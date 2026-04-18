@@ -1,0 +1,17 @@
+# Binaries
+/conduit
+/conduit-server
+/conduit-turn
+/dist/
+
+# Test + coverage artifacts
+*.test
+*.out
+
+# Editors / OS
+/.idea/
+/.vscode/
+.DS_Store
+
+# Claude Code local settings (per-user)
+/.claude/settings.local.json
