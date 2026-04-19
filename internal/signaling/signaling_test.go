@@ -310,18 +310,20 @@ func TestConcurrentReserves(t *testing.T) {
 
 	const pairs = 8
 	var wg sync.WaitGroup
-	errs := make(chan error, pairs)
+	var mu sync.Mutex
+	var errs []error
 	for range pairs {
 		wg.Go(func() {
-			errs <- runRoundTrip(ctx, h)
+			if err := runRoundTrip(ctx, h); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
 		})
 	}
 	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Errorf("round trip: %v", err)
-		}
+	for _, err := range errs {
+		t.Errorf("round trip: %v", err)
 	}
 	// Server-side slot cleanup runs after the client close frame lands, so
 	// allow a short window for ActiveSlots to drain.
