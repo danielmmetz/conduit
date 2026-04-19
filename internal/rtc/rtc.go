@@ -7,8 +7,10 @@
 // PAKE-derived session key K so the server and any TURN relay cannot observe
 // ICE candidates or media lines.
 //
-// Phase 4 scope: direct path preferred; TURN URIs/creds from signaling are
-// passed via cfg.ICEServers. Relay paths are validated in phase 5.
+// Callers choose direct vs. TURN-relayed transport by populating cfg.ICEServers
+// and cfg.TransportPolicy. The default policy gathers host/srflx/relay
+// candidates alongside each other, which lets pion prefer a direct path when
+// one is reachable and fall back to the relay otherwise.
 package rtc
 
 import (
@@ -28,9 +30,13 @@ import (
 )
 
 // Config controls ICE behavior and logging. ICEServers may be nil.
+// TransportPolicy defaults to ICETransportPolicyAll; set to
+// ICETransportPolicyRelay to force traffic through TURN (exercises the relay
+// path; fails closed if no TURN server is reachable).
 type Config struct {
-	ICEServers []webrtc.ICEServer
-	Logger     *slog.Logger
+	ICEServers      []webrtc.ICEServer
+	TransportPolicy webrtc.ICETransportPolicy
+	Logger          *slog.Logger
 }
 
 type signalMsg struct {
@@ -290,7 +296,10 @@ func newPeerConnection(cfg Config) (*webrtc.PeerConnection, error) {
 	// srflx candidates are requested alongside sluggish STUN.
 	se.SetSTUNGatherTimeout(time.Second)
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
-	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: cfg.ICEServers})
+	pc, err := api.NewPeerConnection(webrtc.Configuration{
+		ICEServers:         cfg.ICEServers,
+		ICETransportPolicy: cfg.TransportPolicy,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("creating peer connection: %w", err)
 	}

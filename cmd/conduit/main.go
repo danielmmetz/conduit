@@ -61,8 +61,11 @@ func mainE(ctx context.Context, logger *slog.Logger, out io.Writer, args []strin
 func sendCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text string
+	var noRelay, forceRelay bool
 	fs.StringVar(&server, "server", "http://localhost:8080", "signaling server base URL")
 	fs.StringVar(&text, "text", "", "text payload to send instead of a file")
+	fs.BoolVar(&noRelay, "no-relay", false, "refuse TURN; fail rather than fall back to a relayed path")
+	fs.BoolVar(&forceRelay, "force-relay", false, "force TURN; gather only relay candidates (useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "send",
 		ShortUsage: "conduit send [--text <message> | <path>] [--server URL]",
@@ -70,12 +73,16 @@ func sendCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
+			policy, err := relayPolicy(noRelay, forceRelay)
+			if err != nil {
+				return fmt.Errorf("running send: %w", err)
+			}
 			src, err := openSource(text, args)
 			if err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
 			defer src.Close()
-			return runSend(ctx, logger, out, server, src)
+			return runSend(ctx, logger, out, server, policy, src)
 		},
 	}
 }
@@ -83,8 +90,11 @@ func sendCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit recv", flag.ContinueOnError)
 	var server, outPath string
+	var noRelay, forceRelay bool
 	fs.StringVar(&server, "server", "http://localhost:8080", "signaling server base URL")
 	fs.StringVar(&outPath, "o", "", "write the received payload to this path (default: stdout)")
+	fs.BoolVar(&noRelay, "no-relay", false, "refuse TURN; fail rather than fall back to a relayed path")
+	fs.BoolVar(&forceRelay, "force-relay", false, "force TURN; gather only relay candidates (useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "recv",
 		ShortUsage: "conduit recv <code> [-o PATH] [--server URL]",
@@ -92,6 +102,10 @@ func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
+			policy, err := relayPolicy(noRelay, forceRelay)
+			if err != nil {
+				return fmt.Errorf("running recv: %w", err)
+			}
 			if len(args) != 1 {
 				return fmt.Errorf("usage: conduit recv <code>")
 			}
@@ -107,12 +121,12 @@ func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 				return fmt.Errorf("running recv: %w", err)
 			}
 			defer dst.Close()
-			return runRecv(ctx, logger, server, code, dst)
+			return runRecv(ctx, logger, server, code, policy, dst)
 		},
 	}
 }
 
-func runSend(ctx context.Context, logger *slog.Logger, out io.Writer, server string, src io.ReadCloser) error {
+func runSend(ctx context.Context, logger *slog.Logger, out io.Writer, server string, policy relayChoice, src io.ReadCloser) error {
 	wsURL, err := wsURLFor(server)
 	if err != nil {
 		return fmt.Errorf("resolving websocket URL: %w", err)
@@ -162,9 +176,14 @@ func runSend(ctx context.Context, logger *slog.Logger, out io.Writer, server str
 	}
 	logger.DebugContext(ctx, "pake key derived")
 
+	ice := iceServersForSend(paired, reserved)
+	if policy == relayNone {
+		ice = nil
+	}
 	cfg := rtc.Config{
-		ICEServers: iceServersForSend(paired, reserved),
-		Logger:     logger,
+		ICEServers:      ice,
+		TransportPolicy: policy.transportPolicy(),
+		Logger:          logger,
 	}
 	if err := rtc.Send(ctx, wsMsgConn{conn: conn}, key, cfg, src); err != nil {
 		return fmt.Errorf("sending payload: %w", err)
@@ -174,7 +193,7 @@ func runSend(ctx context.Context, logger *slog.Logger, out io.Writer, server str
 	return nil
 }
 
-func runRecv(ctx context.Context, logger *slog.Logger, server string, code wire.Code, dst io.WriteCloser) error {
+func runRecv(ctx context.Context, logger *slog.Logger, server string, code wire.Code, policy relayChoice, dst io.WriteCloser) error {
 	wsURL, err := wsURLFor(server)
 	if err != nil {
 		return fmt.Errorf("resolving websocket URL: %w", err)
@@ -205,15 +224,53 @@ func runRecv(ctx context.Context, logger *slog.Logger, server string, code wire.
 	}
 	logger.DebugContext(ctx, "pake key derived")
 
+	ice := iceServersFromEnvelope(paired)
+	if policy == relayNone {
+		ice = nil
+	}
 	cfg := rtc.Config{
-		ICEServers: iceServersFromEnvelope(paired),
-		Logger:     logger,
+		ICEServers:      ice,
+		TransportPolicy: policy.transportPolicy(),
+		Logger:          logger,
 	}
 	if err := rtc.Recv(ctx, wsMsgConn{conn: conn}, key, cfg, dst); err != nil {
 		return fmt.Errorf("receiving payload: %w", err)
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 	return nil
+}
+
+// relayChoice captures the sender/receiver preference about TURN usage.
+// relayAuto preserves the default "prefer direct, fall back to relay"; relayNone
+// drops the TURN server so the session fails if the direct path is unreachable;
+// relayOnly forces ICE to gather only relay candidates, so transfers always
+// exercise the TURN path.
+type relayChoice int
+
+const (
+	relayAuto relayChoice = iota
+	relayNone
+	relayOnly
+)
+
+func (r relayChoice) transportPolicy() webrtc.ICETransportPolicy {
+	if r == relayOnly {
+		return webrtc.ICETransportPolicyRelay
+	}
+	return webrtc.ICETransportPolicyAll
+}
+
+func relayPolicy(noRelay, forceRelay bool) (relayChoice, error) {
+	switch {
+	case noRelay && forceRelay:
+		return relayAuto, fmt.Errorf("choosing relay policy: --no-relay and --force-relay are mutually exclusive")
+	case noRelay:
+		return relayNone, nil
+	case forceRelay:
+		return relayOnly, nil
+	default:
+		return relayAuto, nil
+	}
 }
 
 // openSource resolves the payload reader from --text or a positional path arg.
