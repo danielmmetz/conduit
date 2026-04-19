@@ -3,74 +3,82 @@ package signaling_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/danielmmetz/conduit/internal/ratelimit"
 	"github.com/danielmmetz/conduit/internal/signaling"
+	"github.com/danielmmetz/conduit/internal/wire"
 )
 
-func newTestMux(t *testing.T) *http.ServeMux {
+type testHarness struct {
+	ts     *httptest.Server
+	server *signaling.Server
+}
+
+func newTestHarness(t *testing.T, opts ...signaling.Option) *testHarness {
 	t.Helper()
-	srv := signaling.Server{Logger: slog.New(slog.NewTextHandler(t.Output(), nil))}
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+	defaults := []signaling.Option{
+		signaling.WithSlotTTL(2 * time.Second),
+		signaling.WithHelloTimeout(2 * time.Second),
+	}
+	srv := signaling.NewServer(logger, append(defaults, opts...)...)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", srv.HandleWS)
 	mux.HandleFunc("GET /healthz", srv.HandleHealthz)
-	return mux
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return &testHarness{ts: ts, server: srv}
 }
 
-func TestHelloWS(t *testing.T) {
-	ts := httptest.NewServer(newTestMux(t))
-	defer ts.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+func (h *testHarness) dial(ctx context.Context, t *testing.T) *websocket.Conn {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(h.ts.URL, "http") + "/ws"
+	conn, _, err := websocket.Dial(ctx, url, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.CloseNow()
+	t.Cleanup(func() { conn.CloseNow() })
+	return conn
+}
 
-	typ, data, err := conn.Read(ctx)
+func writeJSON(t *testing.T, ctx context.Context, conn *websocket.Conn, v any) {
+	t.Helper()
+	data, err := json.Marshal(v)
 	if err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatalf("marshal: %v", err)
 	}
-	if typ != websocket.MessageText {
-		t.Fatalf("message type = %v, want text", typ)
-	}
-
-	var hello signaling.Hello
-	if err := json.Unmarshal(data, &hello); err != nil {
-		t.Fatalf("unmarshal: %v (payload=%q)", err, data)
-	}
-	if hello.Op != "hello" {
-		t.Errorf("op = %q, want %q", hello.Op, "hello")
-	}
-	if hello.Version != signaling.ProtocolVersion {
-		t.Errorf("version = %q, want %q", hello.Version, signaling.ProtocolVersion)
-	}
-
-	// Server should close cleanly after the hello frame.
-	if _, _, err := conn.Read(ctx); err == nil {
-		t.Fatalf("expected EOF / close after hello, got nil")
-	} else if !isCleanClose(err) {
-		t.Fatalf("unexpected read error after hello: %v", err)
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write: %v", err)
 	}
 }
 
-func TestHealthz(t *testing.T) {
-	ts := httptest.NewServer(newTestMux(t))
-	defer ts.Close()
+func readEnvelope(t *testing.T, ctx context.Context, conn *websocket.Conn) wire.Envelope {
+	t.Helper()
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var env wire.Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal %q: %v", data, err)
+	}
+	return env
+}
 
-	resp, err := ts.Client().Get(ts.URL + "/healthz")
+func TestHealthz(t *testing.T) {
+	h := newTestHarness(t)
+	resp, err := h.ts.Client().Get(h.ts.URL + "/healthz")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -84,7 +92,282 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestReserveAndRelay(t *testing.T) {
+	h := newTestHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sender := h.dial(ctx, t)
+	writeJSON(t, ctx, sender, wire.ClientHello{Op: wire.OpReserve})
+
+	reserved := readEnvelope(t, ctx, sender)
+	if reserved.Op != wire.OpReserved {
+		t.Fatalf("op = %q, want %q", reserved.Op, wire.OpReserved)
+	}
+	if reserved.Slot == 0 {
+		t.Fatalf("slot = 0, want > 0")
+	}
+
+	receiver := h.dial(ctx, t)
+	writeJSON(t, ctx, receiver, wire.ClientHello{Op: wire.OpJoin, Slot: reserved.Slot})
+
+	// Both sides should see "paired".
+	if got := readEnvelope(t, ctx, sender).Op; got != wire.OpPaired {
+		t.Fatalf("sender paired op = %q, want %q", got, wire.OpPaired)
+	}
+	if got := readEnvelope(t, ctx, receiver).Op; got != wire.OpPaired {
+		t.Fatalf("receiver paired op = %q, want %q", got, wire.OpPaired)
+	}
+
+	// Opaque bidirectional relay.
+	if err := sender.Write(ctx, websocket.MessageText, []byte("hello from sender")); err != nil {
+		t.Fatalf("sender write: %v", err)
+	}
+	_, data, err := receiver.Read(ctx)
+	if err != nil {
+		t.Fatalf("receiver read: %v", err)
+	}
+	if string(data) != "hello from sender" {
+		t.Errorf("receiver got %q, want %q", data, "hello from sender")
+	}
+
+	if err := receiver.Write(ctx, websocket.MessageBinary, []byte{0x01, 0x02, 0x03}); err != nil {
+		t.Fatalf("receiver write: %v", err)
+	}
+	typ, data, err := sender.Read(ctx)
+	if err != nil {
+		t.Fatalf("sender read: %v", err)
+	}
+	if typ != websocket.MessageBinary || string(data) != "\x01\x02\x03" {
+		t.Errorf("sender got type=%v data=%x, want binary 010203", typ, data)
+	}
+
+	// Clean close from sender propagates to receiver.
+	if err := sender.Close(websocket.StatusNormalClosure, ""); err != nil {
+		t.Fatalf("sender close: %v", err)
+	}
+	if _, _, err := receiver.Read(ctx); err == nil {
+		t.Fatalf("receiver read after sender close returned nil error")
+	} else if !isCleanClose(err) {
+		t.Fatalf("receiver read error = %v, want clean close", err)
+	}
+
+	// Server-side slot cleanup is deferred after the handler returns; allow
+	// a short window for ActiveSlots to drain.
+	deadline := time.Now().Add(2 * time.Second)
+	for h.server.ActiveSlots() > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := h.server.ActiveSlots(); got != 0 {
+		t.Errorf("ActiveSlots = %d after close, want 0", got)
+	}
+}
+
+func TestJoinUnknownSlot(t *testing.T) {
+	h := newTestHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	receiver := h.dial(ctx, t)
+	writeJSON(t, ctx, receiver, wire.ClientHello{Op: wire.OpJoin, Slot: 424242})
+	env := readEnvelope(t, ctx, receiver)
+	if env.Op != wire.OpError {
+		t.Fatalf("op = %q, want %q", env.Op, wire.OpError)
+	}
+	if env.Code != wire.ErrSlotNotFound {
+		t.Errorf("code = %q, want %q", env.Code, wire.ErrSlotNotFound)
+	}
+}
+
+func TestSlotExpiry(t *testing.T) {
+	h := newTestHarness(t, signaling.WithSlotTTL(200*time.Millisecond))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sender := h.dial(ctx, t)
+	writeJSON(t, ctx, sender, wire.ClientHello{Op: wire.OpReserve})
+	reserved := readEnvelope(t, ctx, sender)
+	if reserved.Op != wire.OpReserved {
+		t.Fatalf("op = %q, want %q", reserved.Op, wire.OpReserved)
+	}
+
+	// Without a receiver, the server should emit an error and close.
+	env := readEnvelope(t, ctx, sender)
+	if env.Op != wire.OpError || env.Code != wire.ErrExpired {
+		t.Fatalf("env = %+v, want expired error", env)
+	}
+	if got := h.server.ActiveSlots(); got != 0 {
+		t.Errorf("ActiveSlots = %d after expiry, want 0", got)
+	}
+}
+
+func TestBadFirstFrame(t *testing.T) {
+	h := newTestHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn := h.dial(ctx, t)
+	if err := conn.Write(ctx, websocket.MessageText, []byte("not json")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	env := readEnvelope(t, ctx, conn)
+	if env.Op != wire.OpError || env.Code != wire.ErrBadRequest {
+		t.Fatalf("env = %+v, want bad_request error", env)
+	}
+}
+
+func TestUnknownOp(t *testing.T) {
+	h := newTestHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn := h.dial(ctx, t)
+	writeJSON(t, ctx, conn, wire.ClientHello{Op: "relocate"})
+	env := readEnvelope(t, ctx, conn)
+	if env.Op != wire.OpError || env.Code != wire.ErrBadRequest {
+		t.Fatalf("env = %+v, want bad_request error", env)
+	}
+}
+
+func TestReserveRateLimited(t *testing.T) {
+	now := time.Unix(0, 0)
+	limiter := ratelimit.KeyedLimiter{
+		Rate:  0,
+		Burst: 1,
+		Now:   func() time.Time { return now },
+	}
+	h := newTestHarness(t, signaling.WithReserveLimiter(&limiter))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sender := h.dial(ctx, t)
+	writeJSON(t, ctx, sender, wire.ClientHello{Op: wire.OpReserve})
+	if env := readEnvelope(t, ctx, sender); env.Op != wire.OpReserved {
+		t.Fatalf("first reserve env = %+v, want reserved", env)
+	}
+
+	second := h.dial(ctx, t)
+	writeJSON(t, ctx, second, wire.ClientHello{Op: wire.OpReserve})
+	env := readEnvelope(t, ctx, second)
+	if env.Op != wire.OpError || env.Code != wire.ErrRateLimited {
+		t.Fatalf("second reserve env = %+v, want rate_limited error", env)
+	}
+}
+
+// TestConcurrentReserves makes sure pairing is race-free under load.
+func TestConcurrentReserves(t *testing.T) {
+	h := newTestHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	const pairs = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, pairs)
+	for range pairs {
+		wg.Go(func() {
+			errs <- runRoundTrip(ctx, h)
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("round trip: %v", err)
+		}
+	}
+	// Server-side slot cleanup runs after the client close frame lands, so
+	// allow a short window for ActiveSlots to drain.
+	deadline := time.Now().Add(2 * time.Second)
+	for h.server.ActiveSlots() > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := h.server.ActiveSlots(); got != 0 {
+		t.Errorf("ActiveSlots = %d after all pairs, want 0", got)
+	}
+}
+
+func runRoundTrip(ctx context.Context, h *testHarness) error {
+	url := "ws" + strings.TrimPrefix(h.ts.URL, "http") + "/ws"
+	sender, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		return fmt.Errorf("dialing sender: %w", err)
+	}
+	defer sender.CloseNow()
+	if err := writeCtl(ctx, sender, wire.ClientHello{Op: wire.OpReserve}); err != nil {
+		return fmt.Errorf("sending reserve: %w", err)
+	}
+	reserved, err := readCtl(ctx, sender)
+	if err != nil {
+		return fmt.Errorf("reading reserved: %w", err)
+	}
+	if reserved.Op != wire.OpReserved {
+		return fmt.Errorf("reserved op = %q", reserved.Op)
+	}
+
+	receiver, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		return fmt.Errorf("dialing receiver: %w", err)
+	}
+	defer receiver.CloseNow()
+	if err := writeCtl(ctx, receiver, wire.ClientHello{Op: wire.OpJoin, Slot: reserved.Slot}); err != nil {
+		return fmt.Errorf("sending join: %w", err)
+	}
+	if p, err := readCtl(ctx, sender); err != nil {
+		return fmt.Errorf("reading sender paired: %w", err)
+	} else if p.Op != wire.OpPaired {
+		return fmt.Errorf("sender paired op = %q", p.Op)
+	}
+	if p, err := readCtl(ctx, receiver); err != nil {
+		return fmt.Errorf("reading receiver paired: %w", err)
+	} else if p.Op != wire.OpPaired {
+		return fmt.Errorf("receiver paired op = %q", p.Op)
+	}
+
+	payload := fmt.Sprintf("slot %d payload", reserved.Slot)
+	if err := sender.Write(ctx, websocket.MessageText, []byte(payload)); err != nil {
+		return fmt.Errorf("writing sender payload: %w", err)
+	}
+	_, got, err := receiver.Read(ctx)
+	if err != nil {
+		return fmt.Errorf("reading receiver payload: %w", err)
+	}
+	if string(got) != payload {
+		return fmt.Errorf("got %q, want %q", got, payload)
+	}
+	_ = sender.Close(websocket.StatusNormalClosure, "")
+	return nil
+}
+
+func writeCtl(ctx context.Context, conn *websocket.Conn, v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshaling: %w", err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		return fmt.Errorf("writing: %w", err)
+	}
+	return nil
+}
+
+func readCtl(ctx context.Context, conn *websocket.Conn) (wire.Envelope, error) {
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		return wire.Envelope{}, fmt.Errorf("reading: %w", err)
+	}
+	var env wire.Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return wire.Envelope{}, fmt.Errorf("unmarshaling: %w", err)
+	}
+	return env, nil
+}
+
 func isCleanClose(err error) bool {
+	if err == nil {
+		return true
+	}
 	status := websocket.CloseStatus(err)
-	return status == websocket.StatusNormalClosure || status == websocket.StatusNoStatusRcvd || err == io.EOF
+	if status == websocket.StatusNormalClosure || status == websocket.StatusNoStatusRcvd || status == websocket.StatusGoingAway {
+		return true
+	}
+	return errors.Is(err, io.EOF)
 }
