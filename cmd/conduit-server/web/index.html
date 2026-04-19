@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>conduit</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+    <script defer src="/wasm_exec.js"></script>
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <header class="top">
+      <h1>conduit</h1>
+      <p class="tagline">End-to-end encrypted transfer · WebRTC · short code</p>
+    </header>
+
+    <main>
+      <label class="field">
+        <span>Server</span>
+        <input type="url" id="serverUrl" autocomplete="off" />
+      </label>
+
+      <section class="panel" id="sendPanel">
+        <h2>Send</h2>
+        <div
+          class="dropzone"
+          id="dropzone"
+          tabindex="0"
+          aria-label="Drop a file here or choose one"
+        >
+          <p>Drop a file here or <button type="button" id="pickBtn">choose a file</button></p>
+          <input type="file" id="fileInput" hidden />
+        </div>
+        <p id="sendFileName" class="muted"></p>
+        <div id="sendCode" class="code-box" hidden>
+          <p class="label">Share this code with the receiver</p>
+          <code id="codeText"></code>
+          <div id="qrHost"></div>
+        </div>
+        <div class="progress" id="sendProgress" hidden>
+          <div class="bar" id="sendBar"></div>
+        </div>
+        <p id="sendStatus" class="status" role="status"></p>
+      </section>
+
+      <section class="panel" id="recvPanel">
+        <h2>Receive</h2>
+        <label class="field">
+          <span>Code</span>
+          <input
+            type="text"
+            id="recvCode"
+            placeholder="42-word-word-word"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <button type="button" id="recvBtn">Receive</button>
+        <div class="progress" id="recvProgress" hidden>
+          <div class="bar" id="recvBar"></div>
+        </div>
+        <p id="recvStatus" class="status" role="status"></p>
+        <p id="recvDownload" hidden>
+          <a id="recvLink" href="#" download="conduit-download">Download file</a>
+        </p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p class="muted">Payloads stay encrypted in transit; the relay only pairs peers.</p>
+    </footer>
+  </body>
+</html>

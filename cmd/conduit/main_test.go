@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielmmetz/conduit/internal/client"
 	"github.com/danielmmetz/conduit/internal/signaling"
 	"github.com/danielmmetz/conduit/internal/turnauth"
 	"github.com/danielmmetz/conduit/internal/turnserver"
@@ -239,27 +240,27 @@ func TestRelayPolicy(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		noRelay, forceRelay bool
-		want                relayChoice
+		want                client.RelayPolicy
 	}{
-		{false, false, relayAuto},
-		{true, false, relayNone},
-		{false, true, relayOnly},
+		{false, false, client.RelayAuto},
+		{true, false, client.RelayNone},
+		{false, true, client.RelayOnly},
 	}
 	for _, c := range cases {
-		got, err := relayPolicy(c.noRelay, c.forceRelay)
+		got, err := client.RelayPolicyFromFlags(c.noRelay, c.forceRelay)
 		if err != nil {
-			t.Errorf("relayPolicy(%v, %v) err = %v", c.noRelay, c.forceRelay, err)
+			t.Errorf("RelayPolicyFromFlags(%v, %v) err = %v", c.noRelay, c.forceRelay, err)
 		}
 		if got != c.want {
-			t.Errorf("relayPolicy(%v, %v) = %v, want %v", c.noRelay, c.forceRelay, got, c.want)
+			t.Errorf("RelayPolicyFromFlags(%v, %v) = %v, want %v", c.noRelay, c.forceRelay, got, c.want)
 		}
 	}
 }
 
 func TestRelayPolicyConflict(t *testing.T) {
 	t.Parallel()
-	if _, err := relayPolicy(true, true); err == nil {
-		t.Fatal("relayPolicy(true, true) err = nil, want error")
+	if _, err := client.RelayPolicyFromFlags(true, true); err == nil {
+		t.Fatal("RelayPolicyFromFlags(true, true) err = nil, want error")
 	}
 }
 
@@ -324,39 +325,3 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func TestWsURLForValid(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		in, want string
-	}{
-		{"http://localhost:8080", "ws://localhost:8080/ws"},
-		{"https://example.com", "wss://example.com/ws"},
-		{"ws://example.com/", "ws://example.com/ws"},
-		{"wss://example.com/base", "wss://example.com/base/ws"},
-	}
-	for _, c := range cases {
-		t.Run(c.in, func(t *testing.T) {
-			t.Parallel()
-			got, err := wsURLFor(c.in)
-			if err != nil {
-				t.Fatalf("wsURLFor(%q) err = %v", c.in, err)
-			}
-			if got != c.want {
-				t.Errorf("wsURLFor(%q) = %q, want %q", c.in, got, c.want)
-			}
-		})
-	}
-}
-
-func TestWsURLForInvalid(t *testing.T) {
-	t.Parallel()
-	for _, in := range []string{"example.com", "ftp://example.com"} {
-		t.Run(in, func(t *testing.T) {
-			t.Parallel()
-			got, err := wsURLFor(in)
-			if err == nil {
-				t.Fatalf("wsURLFor(%q) = %q, want error", in, got)
-			}
-		})
-	}
-}

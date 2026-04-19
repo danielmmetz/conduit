@@ -1,5 +1,8 @@
-// conduit-turn is a thin pion/turn wrapper co-located with conduit-server. It
-// authenticates ephemeral credentials minted by the signaling server via
+// conduit-turn is a standalone pion/turn process for deployments that want TURN
+// on a separate host or port from conduit-server. The same TURN stack is also
+// available in-process via conduit-server --turn-embed.
+//
+// It authenticates ephemeral credentials minted by the signaling server via
 // internal/turnauth (RFC 8489 long-term/ REST-style: username is
 // "<expiry>:<prefix>"; credential is base64 HMAC-SHA1 over the username).
 //

@@ -1,0 +1,198 @@
+//go:build js && wasm
+
+// conduit-wasm is the browser entrypoint: it registers globalThis.conduit with
+// send/recv methods that drive the shared internal/client transfer path.
+package main
+
+import (
+	"bytes"
+	"context"
+	"io"
+	"log/slog"
+	"sync"
+	"syscall/js"
+
+	"github.com/danielmmetz/conduit/internal/client"
+	"github.com/danielmmetz/conduit/internal/wire"
+)
+
+func main() {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	rootCtx := context.Background()
+	b := newWasmBridge(logger)
+	b.register(rootCtx)
+	select {}
+}
+
+// wasmBridge binds syscall/js callbacks to internal/client. Each async
+// operation uses [sync.WaitGroup.Go] so goroutine lifetimes are tracked without
+// manual Add/Done. The browser runtime does not stop the WASM module, so
+// nothing calls Wait.
+type wasmBridge struct {
+	logger *slog.Logger
+	ops    sync.WaitGroup
+}
+
+func newWasmBridge(logger *slog.Logger) *wasmBridge {
+	return &wasmBridge{logger: logger}
+}
+
+func (b *wasmBridge) register(ctx context.Context) {
+	exports := js.Global().Get("Object").New()
+	exports.Set("send", js.FuncOf(func(this js.Value, args []js.Value) any {
+		return b.sendJS(ctx, this, args)
+	}))
+	exports.Set("recv", js.FuncOf(func(this js.Value, args []js.Value) any {
+		return b.recvJS(ctx, this, args)
+	}))
+	js.Global().Set("conduit", exports)
+}
+
+func (b *wasmBridge) startOp(f func()) {
+	b.ops.Go(f)
+}
+
+const (
+	sendJSArgN = 5 // server, payload, onCode, onProgress, onDone
+	recvJSArgN = 4 // server, code, onProgress, onDone
+)
+
+// sendJS(server, payload, onCode, onProgress, onDone)
+// onCode(code string) when the slot is reserved; onProgress(done, total int);
+// onDone(err) where err is null on success.
+func (b *wasmBridge) sendJS(parent context.Context, _ js.Value, args []js.Value) any {
+	if len(args) < sendJSArgN {
+		return js.Undefined()
+	}
+	server := args[0].String()
+	payload := copyBytesFromJS(args[1])
+	onCode := args[2]
+	onProgress := args[3]
+	onDone := args[4]
+	if onDone.Type() != js.TypeFunction {
+		return js.Undefined()
+	}
+
+	b.startOp(func() {
+		b.runSend(parent, server, payload, onCode, onProgress, onDone)
+	})
+	return js.Undefined()
+}
+
+func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte, onCode, onProgress, onDone js.Value) {
+	pr := &progressReader{
+		r:     bytes.NewReader(payload),
+		total: int64(len(payload)),
+		onProgress: func(done, total int64) {
+			if onProgress.Type() == js.TypeFunction && onProgress.Truthy() {
+				onProgress.Invoke(done, total)
+			}
+		},
+	}
+	err := client.Send(ctx, b.logger, server, client.RelayAuto, pr, func(code string) {
+		if onCode.Type() == js.TypeFunction && onCode.Truthy() {
+			onCode.Invoke(code)
+		}
+	})
+	if err != nil {
+		onDone.Invoke(err.Error())
+		return
+	}
+	onDone.Invoke(js.Null())
+}
+
+// recvJS(server, code, onProgress, onDone)
+// onProgress(bytesReceived int); onDone(err, data) where err is null on success
+// and data is a Uint8Array of the payload.
+func (b *wasmBridge) recvJS(parent context.Context, _ js.Value, args []js.Value) any {
+	if len(args) < recvJSArgN {
+		return js.Undefined()
+	}
+	server := args[0].String()
+	codeStr := args[1].String()
+	onProgress := args[2]
+	onDone := args[3]
+	if onDone.Type() != js.TypeFunction {
+		return js.Undefined()
+	}
+
+	b.startOp(func() {
+		b.runRecv(parent, server, codeStr, onProgress, onDone)
+	})
+	return js.Undefined()
+}
+
+func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProgress, onDone js.Value) {
+	code, err := wire.ParseCode(codeStr)
+	if err != nil {
+		onDone.Invoke(err.Error(), js.Null())
+		return
+	}
+	if len(code.Words) == 0 {
+		onDone.Invoke("code is missing the word portion", js.Null())
+		return
+	}
+	var buf bytes.Buffer
+	pw := &progressWriter{
+		dst: &buf,
+		cb: func(total int64) {
+			if onProgress.Type() == js.TypeFunction && onProgress.Truthy() {
+				onProgress.Invoke(total)
+			}
+		},
+	}
+	err = client.Recv(ctx, b.logger, server, code, client.RelayAuto, pw)
+	if err != nil {
+		onDone.Invoke(err.Error(), js.Null())
+		return
+	}
+	ua := uint8ArrayFromBytes(buf.Bytes())
+	onDone.Invoke(js.Null(), ua)
+}
+
+func copyBytesFromJS(v js.Value) []byte {
+	if v.IsNull() || v.IsUndefined() {
+		return nil
+	}
+	n := v.Get("length").Int()
+	b := make([]byte, n)
+	js.CopyBytesToGo(b, v)
+	return b
+}
+
+func uint8ArrayFromBytes(b []byte) js.Value {
+	ua := js.Global().Get("Uint8Array").New(len(b))
+	js.CopyBytesToJS(ua, b)
+	return ua
+}
+
+type progressReader struct {
+	r          io.Reader
+	n          int64
+	total      int64
+	onProgress func(done, total int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 && p.onProgress != nil {
+		p.n += int64(n)
+		p.onProgress(p.n, p.total)
+	}
+	return n, err
+}
+
+type progressWriter struct {
+	dst io.Writer
+	n   int64
+	cb  func(total int64)
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	n, err := p.dst.Write(b)
+	if n > 0 && p.cb != nil {
+		p.n += int64(n)
+		p.cb(p.n)
+	}
+	return n, err
+}

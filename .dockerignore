@@ -1,0 +1,6 @@
+.git
+.cursor
+*.md
+conduit
+conduit-server
+conduit-turn

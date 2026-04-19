@@ -2,7 +2,12 @@
 /conduit
 /conduit-server
 /conduit-turn
+/conduit-wasm
 /dist/
+
+# go generate (tools/genwasm) — keep hand-written web/*.html, *.js, *.css tracked
+/cmd/conduit-server/web/main.wasm
+/cmd/conduit-server/web/wasm_exec.js
 
 # Test + coverage artifacts
 *.test

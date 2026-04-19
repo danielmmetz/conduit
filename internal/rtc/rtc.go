@@ -22,11 +22,10 @@ import (
 	"io"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/danielmmetz/conduit/internal/wire"
-	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
+	"golang.org/x/sync/errgroup"
 )
 
 // Config controls ICE behavior and logging. ICEServers may be nil.
@@ -44,10 +43,13 @@ type signalMsg struct {
 	SDP  string `json:"sdp"`
 }
 
-// teardownSignal is sent on the signaling connection after SCTP data-channel
-// teardown handshakes complete; the receiver waits for it before closing its
-// PeerConnection so an SCTP ABORT does not overtake the outbound stream reset
-// (Close queues the reset but does not wait for it to be transmitted).
+// teardownSignal is exchanged bidirectionally on the signaling connection
+// after the encrypted payload has been fully transferred at the application
+// layer. Each peer sends teardownSignal once its own half of the transfer is
+// complete, then waits for the peer's matching signal before closing the
+// PeerConnection. This avoids relying on SCTP stream-reset semantics, which
+// are not exposed uniformly across pion/native and pion/js DataChannel
+// implementations.
 const teardownSignal = "data_teardown"
 
 // datachanWait records the first detached data channel or error from pion
@@ -100,14 +102,14 @@ func (d *datachanWait) wait(ctx context.Context) (io.ReadWriteCloser, error) {
 
 // Send opens a data channel, sends the SDP offer over sig, and once the
 // channel is open streams age-encrypted payload from src to the peer. It
-// returns after the payload has been flushed, SCTP teardown on the data
-// channel has completed, and a final teardown message has been sent on sig.
+// returns after the payload has been flushed and the bidirectional teardown
+// handshake has completed over sig.
 func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.Reader) error {
 	pc, err := newPeerConnection(cfg)
 	if err != nil {
 		return fmt.Errorf("sending: %w", err)
 	}
-	defer func() { _ = pc.GracefulClose() }()
+	defer func() { _ = pc.Close() }()
 
 	dc, err := pc.CreateDataChannel("conduit", nil)
 	if err != nil {
@@ -163,7 +165,8 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 	}
 	defer raw.Close()
 
-	wc, err := wire.Encrypt(raw, key)
+	tw := newTagWriter(raw)
+	wc, err := wire.Encrypt(tw, key)
 	if err != nil {
 		return fmt.Errorf("sending: starting encrypt: %w", err)
 	}
@@ -174,31 +177,27 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 	if err := wc.Close(); err != nil {
 		return fmt.Errorf("sending: finalizing encrypt: %w", err)
 	}
-	// Signal end-of-stream to the peer via SCTP stream reset, so age's
-	// decrypt sees EOF after the final chunk. Then block until we observe
-	// the remote's matching reset (io.EOF on Read); this guarantees the
-	// receiver drained before we tear down the PeerConnection.
-	if err := raw.Close(); err != nil {
-		return fmt.Errorf("sending: closing data channel: %w", err)
+	// Emits a single tagEOF sentinel message so the peer's tagReader
+	// returns io.EOF to age without depending on SCTP stream-reset
+	// semantics (which pion's JS data channel does not expose).
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("sending: finalizing framing: %w", err)
 	}
-	if err := waitPeerClose(ctx, raw); err != nil {
-		return fmt.Errorf("sending: %w", err)
-	}
-	if err := sendSignal(ctx, sig, key, signalMsg{Type: teardownSignal}); err != nil {
+	if err := exchangeTeardown(ctx, sig, key); err != nil {
 		return fmt.Errorf("sending: %w", err)
 	}
 	return nil
 }
 
 // Recv accepts a data channel from the peer, responds to the SDP offer, and
-// writes decrypted payload to dst until the peer closes the channel, then
-// reads one final teardown message from sig before closing the PeerConnection.
+// writes decrypted payload to dst until the age stream ends, then performs
+// the bidirectional teardown handshake over sig.
 func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.Writer) error {
 	pc, err := newPeerConnection(cfg)
 	if err != nil {
 		return fmt.Errorf("receiving: %w", err)
 	}
-	defer func() { _ = pc.GracefulClose() }()
+	defer func() { _ = pc.Close() }()
 
 	openWait := newDatachanWait()
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
@@ -251,26 +250,16 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 	}
 	defer raw.Close()
 
-	pr, err := wire.Decrypt(raw, key)
+	tr := newTagReader(raw)
+	pr, err := wire.Decrypt(tr, key)
 	if err != nil {
 		return fmt.Errorf("receiving: starting decrypt: %w", err)
 	}
 	if _, err := io.Copy(dst, pr); err != nil {
 		return fmt.Errorf("receiving: copying payload: %w", err)
 	}
-	// Reset our outgoing SCTP stream; the sender's Read observes EOF and
-	// finishes waitPeerClose, then sends teardownSignal on the signaling
-	// connection. We wait for that message before closing our PeerConnection
-	// so an SCTP ABORT does not overtake our outbound stream reset.
-	if err := raw.Close(); err != nil {
-		return fmt.Errorf("receiving: closing data channel: %w", err)
-	}
-	last, err := recvSignal(ctx, sig, key)
-	if err != nil {
+	if err := exchangeTeardown(ctx, sig, key); err != nil {
 		return fmt.Errorf("receiving: %w", err)
-	}
-	if last.Type != teardownSignal {
-		return fmt.Errorf("receiving: expected teardown signal %q, got %q", teardownSignal, last.Type)
 	}
 	return nil
 }
@@ -278,23 +267,7 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 func newPeerConnection(cfg Config) (*webrtc.PeerConnection, error) {
 	var se webrtc.SettingEngine
 	se.DetachDataChannels()
-	// Disable mDNS ICE candidate obfuscation. The default mode advertises
-	// host candidates as random .local names resolvable only via an mDNS
-	// responder, which breaks loopback connectivity in test environments
-	// and constrained networks.
-	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
-	// Without loopback candidates, same-host peers only see LAN IPs; under
-	// load ICE can sit behind srflx/prflx minimum-wait timers and miss tight
-	// CLI deadlines. Loopback host candidates make 127.0.0.1/::1 pairs
-	// available immediately for local transfers.
-	se.SetIncludeLoopbackCandidate(true)
-	// Defaults wait 500ms/1s before nominating srflx/prflx pairs; that often
-	// consumes the tail of short contexts even when a host pair is viable.
-	se.SetSrflxAcceptanceMinWait(0)
-	se.SetPrflxAcceptanceMinWait(0)
-	// Default 5s STUN gather timeout can dominate small operation budgets when
-	// srflx candidates are requested alongside sluggish STUN.
-	se.SetSTUNGatherTimeout(time.Second)
+	applyNativeSettings(&se)
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers:         cfg.ICEServers,
@@ -359,27 +332,27 @@ func recvSignal(ctx context.Context, mc wire.MsgConn, key []byte) (signalMsg, er
 	return out, nil
 }
 
-// waitPeerClose blocks until rc observes io.EOF, meaning the peer has reset
-// its outgoing SCTP stream. If ctx is canceled, it closes rc to unblock the
-// inner Read, joins the watcher goroutine, and returns ctx.Err().
-func waitPeerClose(ctx context.Context, rc io.ReadCloser) error {
-	var wg sync.WaitGroup
-	watchDone := make(chan struct{})
-	wg.Go(func() {
-		select {
-		case <-ctx.Done():
-			_ = rc.Close()
-		case <-watchDone:
-		}
-	})
-	_, err := io.Copy(io.Discard, rc)
-	close(watchDone)
-	wg.Wait()
-	if ctx.Err() != nil {
-		return fmt.Errorf("waiting for peer close: %w", ctx.Err())
+// exchangeTeardown performs the two-way teardown handshake: both peers send
+// teardownSignal concurrently (so neither deadlocks waiting for the other to
+// send first) and each reads the peer's matching signal. Returns only after
+// both halves complete — at which point all application payload has been
+// transferred and both PeerConnections can safely close.
+func exchangeTeardown(ctx context.Context, mc wire.MsgConn, key []byte) error {
+	var (
+		eg   errgroup.Group
+		peer signalMsg
+	)
+	eg.Go(func() error { return sendSignal(ctx, mc, key, signalMsg{Type: teardownSignal}) })
+	got, recvErr := recvSignal(ctx, mc, key)
+	if err := eg.Wait(); err != nil {
+		return fmt.Errorf("exchanging teardown: %w", err)
 	}
-	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("waiting for peer close: %w", err)
+	if recvErr != nil {
+		return fmt.Errorf("exchanging teardown: %w", recvErr)
+	}
+	peer = got
+	if peer.Type != teardownSignal {
+		return fmt.Errorf("exchanging teardown: expected %q, got %q", teardownSignal, peer.Type)
 	}
 	return nil
 }
