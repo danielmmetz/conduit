@@ -10,6 +10,7 @@
 //
 //	{"op":"reserved","slot":N}    ack of reservation; sender should display N
 //	{"op":"paired"}               both peers attached; opaque relay begins
+//	                              (optional "turn" when server issues TURN)
 //	{"op":"error","code":...}     protocol error; server closes the socket
 //
 // After receiving a "paired" frame on a socket, all subsequent frames on that
@@ -44,12 +45,25 @@ type ClientHello struct {
 }
 
 type Reserved struct {
-	Op   string `json:"op"`
-	Slot uint32 `json:"slot"`
+	Op   string     `json:"op"`
+	Slot uint32     `json:"slot"`
+	TURN *TurnCreds `json:"turn,omitempty"`
 }
 
+// TurnCreds carries short-term TURN credentials from the signaling server.
+// Credential is RFC 8489 HMAC-SHA1 base64; TTL is seconds until expiry.
+type TurnCreds struct {
+	URIs       []string `json:"uris"`
+	Username   string   `json:"username"`
+	Credential string   `json:"credential"`
+	TTL        int      `json:"ttl"`
+}
+
+// Paired announces pairing; TURN is present when the server issues credentials
+// so both peers can configure WebRTC ICE (receiver never saw "reserved").
 type Paired struct {
-	Op string `json:"op"`
+	Op   string     `json:"op"`
+	TURN *TurnCreds `json:"turn,omitempty"`
 }
 
 type Error struct {
@@ -60,8 +74,9 @@ type Error struct {
 
 // Envelope carries any control frame for decoding when the op is not yet known.
 type Envelope struct {
-	Op      string `json:"op"`
-	Slot    uint32 `json:"slot,omitempty"`
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
+	Op      string     `json:"op"`
+	Slot    uint32     `json:"slot,omitempty"`
+	Code    string     `json:"code,omitempty"`
+	Message string     `json:"message,omitempty"`
+	TURN    *TurnCreds `json:"turn,omitempty"`
 }

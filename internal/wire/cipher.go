@@ -9,9 +9,10 @@ import (
 
 // ageWorkFactor is the scrypt logN used when writing payloads. K already has
 // SessionKeySize*8 bits of entropy, so scrypt's stretching is not needed for
-// security; a non-trivial factor only sidesteps any future library-side lower
-// bound and costs <1s once per transfer (not per chunk).
-const ageWorkFactor = 15
+// security; use the minimum work factor so each encrypted stream (signaling
+// frames and payload) does not pile up CPU on hosts running many sessions or
+// tests in parallel.
+const ageWorkFactor = 1
 
 // Encrypt returns an io.WriteCloser that wraps dst with age's scrypt recipient
 // keyed by the 32-byte session key K. Caller must Close to finalize.

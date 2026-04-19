@@ -3,94 +3,189 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/danielmmetz/conduit/internal/signaling"
+	"golang.org/x/sync/errgroup"
 )
 
+// Full-stack send/recv tests below spin up real pion PeerConnections (UDP/ICE
+// on loopback). Running them with t.Parallel() against each other routinely
+// caused flakes before ICE was tuned for local candidates; the rest of this
+// package stays parallel. internal/rtc tests use an in-memory MsgConn only and
+// do not need this serialization.
 func TestSendRecvRoundTrip(t *testing.T) {
 	srv := signaling.NewServer(
 		slog.New(slog.NewTextHandler(t.Output(), nil)),
-		signaling.WithSlotTTL(5*time.Second),
-		signaling.WithHelloTimeout(5*time.Second),
+		signaling.WithSlotTTL(2*time.Second),
+		signaling.WithHelloTimeout(2*time.Second),
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", srv.HandleWS)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 
-	sendOut := &syncBuffer{}
-	recvOut := &syncBuffer{}
+	var sendBuf, recvBuf syncBuffer
 
-	type result struct {
-		out string
-		err error
-	}
-	sendCtx, cancelSend := context.WithCancel(ctx)
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	defer cancelSend()
-	sendDone := make(chan result, 1)
-	wg.Go(func() {
-		err := mainE(sendCtx, logger, sendOut, []string{"send", "--server", ts.URL, "--text", "hello conduit"})
-		sendDone <- result{out: sendOut.String(), err: err}
-	})
+	codeCh := make(chan string, 1)
+	sendOut := &codeNotifyBuffer{buf: &sendBuf, ch: codeCh}
 
-	// Poll sender output for the reserved code line.
-	var code string
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		line, ok := extractCode(sendOut.String())
-		if ok {
-			code = line
-			break
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		defer close(codeCh)
+		if err := mainE(gctx, logger, sendOut, []string{"send", "--server", ts.URL, "--text", "hello conduit"}); err != nil {
+			return fmt.Errorf("send: %w", err)
 		}
-		time.Sleep(20 * time.Millisecond)
+		return nil
+	})
+	g.Go(func() error {
+		var code string
+		select {
+		case c, ok := <-codeCh:
+			if !ok {
+				return fmt.Errorf("recv: sender exited before code was available")
+			}
+			code = c
+		case <-gctx.Done():
+			return fmt.Errorf("recv: %w", gctx.Err())
+		}
+		if err := mainE(gctx, logger, &recvBuf, []string{"recv", "--server", ts.URL, code}); err != nil {
+			return fmt.Errorf("recv: %w", err)
+		}
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		t.Fatalf("send/recv: %v (sender out=%q)", err, sendBuf.String())
 	}
-	if code == "" {
-		t.Fatalf("did not observe code in sender output; got=%q", sendOut.String())
-	}
-
-	if err := mainE(ctx, logger, recvOut, []string{"recv", "--server", ts.URL, code}); err != nil {
-		t.Fatalf("recv: %v (sender out so far: %q)", err, sendOut.String())
-	}
-	if got := strings.TrimSpace(recvOut.String()); got != "hello conduit" {
+	if got := strings.TrimSpace(recvBuf.String()); got != "hello conduit" {
 		t.Errorf("recv output = %q, want %q", got, "hello conduit")
 	}
+}
 
-	select {
-	case r := <-sendDone:
-		if r.err != nil {
-			t.Errorf("send err = %v", r.err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("send did not complete")
+func TestSendRecvFileRoundTrip(t *testing.T) {
+	srv := signaling.NewServer(
+		slog.New(slog.NewTextHandler(t.Output(), nil)),
+		signaling.WithSlotTTL(2*time.Second),
+		signaling.WithHelloTimeout(2*time.Second),
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /ws", srv.HandleWS)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	tmp := t.TempDir()
+	sendPath := filepath.Join(tmp, "payload.bin")
+	payload := bytes.Repeat([]byte("conduit phase 4 file payload\n"), 512)
+	if err := os.WriteFile(sendPath, payload, 0o644); err != nil {
+		t.Fatal(err)
 	}
+	recvPath := filepath.Join(tmp, "received.bin")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+
+	var sendBuf syncBuffer
+
+	codeCh := make(chan string, 1)
+	sendOut := &codeNotifyBuffer{buf: &sendBuf, ch: codeCh}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		defer close(codeCh)
+		if err := mainE(gctx, logger, sendOut, []string{"send", "--server", ts.URL, sendPath}); err != nil {
+			return fmt.Errorf("send: %w", err)
+		}
+		return nil
+	})
+	g.Go(func() error {
+		var code string
+		select {
+		case c, ok := <-codeCh:
+			if !ok {
+				return fmt.Errorf("recv: sender exited before code was available")
+			}
+			code = c
+		case <-gctx.Done():
+			return fmt.Errorf("recv: %w", gctx.Err())
+		}
+		if err := mainE(gctx, logger, io.Discard, []string{"recv", "--server", ts.URL, "-o", recvPath, code}); err != nil {
+			return fmt.Errorf("recv: %w", err)
+		}
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		t.Fatalf("send/recv: %v (sender out=%q)", err, sendBuf.String())
+	}
+	got, err := os.ReadFile(recvPath)
+	if err != nil {
+		t.Fatalf("read received file: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("received %d bytes, want %d (prefix recv %q want %q)",
+			len(got), len(payload), truncateForLog(got, 64), truncateForLog(payload, 64))
+	}
+}
+
+func truncateForLog(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "…"
 }
 
 // extractCode pulls the numeric slot out of the "code: N" line.
 func extractCode(out string) (string, bool) {
 	const prefix = "code: "
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+	for line := range strings.SplitSeq(out, "\n") {
+		if after, ok := strings.CutPrefix(line, prefix); ok {
+			return strings.TrimSpace(after), true
 		}
 	}
 	return "", false
 }
 
-// syncBuffer is a concurrency-safe bytes.Buffer; the sender goroutine writes
-// while the test's main goroutine reads.
+// codeNotifyBuffer forwards writes to buf and delivers the first full "code:"
+// line on ch (used to start recv without polling send output).
+type codeNotifyBuffer struct {
+	buf  *syncBuffer
+	ch   chan<- string
+	sent atomic.Bool
+}
+
+func (w *codeNotifyBuffer) Write(p []byte) (int, error) {
+	n, err := w.buf.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if w.sent.Load() {
+		return n, nil
+	}
+	if code, ok := extractCode(w.buf.String()); ok {
+		if w.sent.CompareAndSwap(false, true) {
+			w.ch <- code
+		}
+	}
+	return n, nil
+}
+
+// syncBuffer is a concurrency-safe bytes.Buffer shared by the codeNotifyBuffer
+// and the test after wg.Wait.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -108,64 +203,41 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func TestParseCode(t *testing.T) {
+func TestWsURLForValid(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
-		in   string
-		want uint32
-		err  bool
+		in, want string
 	}{
-		{"42", 42, false},
-		{"42-ice-cream-monkey", 42, false},
-		{"1", 1, false},
-		{"", 0, true},
-		{"abc", 0, true},
-		{"-1", 0, true},
+		{"http://localhost:8080", "ws://localhost:8080/ws"},
+		{"https://example.com", "wss://example.com/ws"},
+		{"ws://example.com/", "ws://example.com/ws"},
+		{"wss://example.com/base", "wss://example.com/base/ws"},
 	}
 	for _, c := range cases {
-		got, err := parseCode(c.in)
-		if c.err {
-			if err == nil {
-				t.Errorf("parseCode(%q) = %d, want error", c.in, got)
+		c := c
+		t.Run(c.in, func(t *testing.T) {
+			t.Parallel()
+			got, err := wsURLFor(c.in)
+			if err != nil {
+				t.Fatalf("wsURLFor(%q) err = %v", c.in, err)
 			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("parseCode(%q) err = %v", c.in, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("parseCode(%q) = %d, want %d", c.in, got, c.want)
-		}
+			if got != c.want {
+				t.Errorf("wsURLFor(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }
 
-func TestWsURLFor(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-		err  bool
-	}{
-		{"http://localhost:8080", "ws://localhost:8080/ws", false},
-		{"https://example.com", "wss://example.com/ws", false},
-		{"ws://example.com/", "ws://example.com/ws", false},
-		{"wss://example.com/base", "wss://example.com/base/ws", false},
-		{"example.com", "", true},
-		{"ftp://example.com", "", true},
-	}
-	for _, c := range cases {
-		got, err := wsURLFor(c.in)
-		if c.err {
+func TestWsURLForInvalid(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{"example.com", "ftp://example.com"} {
+		in := in
+		t.Run(in, func(t *testing.T) {
+			t.Parallel()
+			got, err := wsURLFor(in)
 			if err == nil {
-				t.Errorf("wsURLFor(%q) = %q, want error", c.in, got)
+				t.Fatalf("wsURLFor(%q) = %q, want error", in, got)
 			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("wsURLFor(%q) err = %v", c.in, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("wsURLFor(%q) = %q, want %q", c.in, got, c.want)
-		}
+		})
 	}
 }

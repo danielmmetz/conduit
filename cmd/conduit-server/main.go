@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/danielmmetz/conduit/internal/ratelimit"
 	"github.com/danielmmetz/conduit/internal/signaling"
+	"github.com/danielmmetz/conduit/internal/turnauth"
 	"github.com/peterbourgon/ff/v3"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
@@ -45,6 +47,10 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 		joinBurst     int
 		idleTTL       time.Duration
 		trustXFF      bool
+		turnSecret    string
+		turnURIs      stringList
+		turnTTL       time.Duration
+		turnPrefix    string
 	)
 	fs.StringVar(&addr, "addr", ":8080", "listen address")
 	fs.DurationVar(&slotTTL, "slot-ttl", 10*time.Minute, "how long a reserved slot waits for a receiver")
@@ -55,6 +61,10 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 	fs.IntVar(&joinBurst, "join-burst", 20, "join burst size")
 	fs.DurationVar(&idleTTL, "rate-idle-ttl", 15*time.Minute, "evict per-IP rate limit state after this idle period")
 	fs.BoolVar(&trustXFF, "trust-xff", false, "derive source IP from X-Forwarded-For (only when fronted by a trusted proxy)")
+	fs.StringVar(&turnSecret, "turn-secret", "", "shared secret for RFC 8489 TURN credentials (empty disables issuance)")
+	fs.Var(&turnURIs, "turn-uri", "TURN URI to advertise (repeat or comma-separate; e.g. turn:turn.example:3478)")
+	fs.DurationVar(&turnTTL, "turn-ttl", 10*time.Minute, "TTL embedded in TURN credentials")
+	fs.StringVar(&turnPrefix, "turn-prefix", "conduit", "suffix appended to TURN usernames after the expiry timestamp")
 	if err := ff.Parse(fs, os.Args[1:], ff.WithEnvVarPrefix("CONDUIT_SERVER")); err != nil {
 		return fmt.Errorf("parsing flags: %w", err)
 	}
@@ -77,6 +87,13 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 			Burst:   joinBurst,
 			IdleTTL: idleTTL,
 		}))
+	}
+	if turnSecret != "" {
+		turnIss, err := turnauth.NewIssuer([]byte(turnSecret), turnURIs, turnTTL, turnPrefix, time.Now)
+		if err != nil {
+			return fmt.Errorf("creating turn issuer: %w", err)
+		}
+		opts = append(opts, signaling.WithTurnIssuer(turnIss))
 	}
 	srv := signaling.NewServer(logger, opts...)
 
@@ -111,6 +128,18 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 	}
 	if shutdownErr != nil {
 		return fmt.Errorf("shutting down: %w", shutdownErr)
+	}
+	return nil
+}
+
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error {
+	for p := range strings.SplitSeq(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			*s = append(*s, p)
+		}
 	}
 	return nil
 }

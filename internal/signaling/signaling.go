@@ -21,6 +21,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/danielmmetz/conduit/internal/ratelimit"
+	"github.com/danielmmetz/conduit/internal/turnauth"
 	"github.com/danielmmetz/conduit/internal/wire"
 )
 
@@ -34,6 +35,7 @@ type Server struct {
 	maxSlot            uint32
 	reserveLimiter     *ratelimit.KeyedLimiter
 	joinLimiter        *ratelimit.KeyedLimiter
+	turnIssuer         *turnauth.Issuer
 	trustXForwardedFor bool
 
 	mu    sync.Mutex
@@ -66,6 +68,12 @@ func WithReserveLimiter(l *ratelimit.KeyedLimiter) Option {
 // WithJoinLimiter installs a per-IP rate limiter for join ops.
 func WithJoinLimiter(l *ratelimit.KeyedLimiter) Option {
 	return func(s *Server) { s.joinLimiter = l }
+}
+
+// WithTurnIssuer installs a TURN credential issuer. When set, the server
+// includes fresh credentials in every Reserved frame.
+func WithTurnIssuer(iss *turnauth.Issuer) Option {
+	return func(s *Server) { s.turnIssuer = iss }
 }
 
 // WithTrustXForwardedFor, when true, derives the source IP for rate limiting
@@ -176,7 +184,17 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 	defer sl.cancel()
 	defer s.removeSlot(sl.id)
 
-	if err := writeJSON(ctx, conn, wire.Reserved{Op: wire.OpReserved, Slot: sl.id}); err != nil {
+	reserved := wire.Reserved{Op: wire.OpReserved, Slot: sl.id}
+	if s.turnIssuer != nil {
+		creds := s.turnIssuer.Issue()
+		reserved.TURN = &wire.TurnCreds{
+			URIs:       creds.URIs,
+			Username:   creds.Username,
+			Credential: creds.Credential,
+			TTL:        creds.TTL,
+		}
+	}
+	if err := writeJSON(ctx, conn, reserved); err != nil {
 		return
 	}
 
@@ -204,11 +222,12 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 	}
 
 	// From here, both peers are attached. Announce pairing to each end, then
-	// release the receiver handler to start relaying.
-	if err := writeJSON(ctx, conn, wire.Paired{Op: wire.OpPaired}); err != nil {
+	// release the receiver handler to start relaying. Fresh TURN credentials
+	// (when configured) are included so both peers can gather relay candidates.
+	if err := writeJSON(ctx, conn, s.pairedCtl()); err != nil {
 		return
 	}
-	if err := writeJSON(ctx, sl.receiverConn, wire.Paired{Op: wire.OpPaired}); err != nil {
+	if err := writeJSON(ctx, sl.receiverConn, s.pairedCtl()); err != nil {
 		return
 	}
 	close(sl.relayStart)
@@ -363,6 +382,20 @@ func relay(ctx context.Context, src, dst *websocket.Conn) error {
 			return fmt.Errorf("writing relay frame: %w", err)
 		}
 	}
+}
+
+func (s *Server) pairedCtl() wire.Paired {
+	msg := wire.Paired{Op: wire.OpPaired}
+	if s.turnIssuer != nil {
+		creds := s.turnIssuer.Issue()
+		msg.TURN = &wire.TurnCreds{
+			URIs:       creds.URIs,
+			Username:   creds.Username,
+			Credential: creds.Credential,
+			TTL:        creds.TTL,
+		}
+	}
+	return msg
 }
 
 func writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {

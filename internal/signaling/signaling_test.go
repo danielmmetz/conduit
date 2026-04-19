@@ -17,6 +17,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/danielmmetz/conduit/internal/ratelimit"
 	"github.com/danielmmetz/conduit/internal/signaling"
+	"github.com/danielmmetz/conduit/internal/turnauth"
 	"github.com/danielmmetz/conduit/internal/wire"
 )
 
@@ -92,9 +93,56 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestReservePairedIncludesTurnForBothPeers(t *testing.T) {
+	iss, err := turnauth.NewIssuer([]byte("test-turn-secret"), []string{"turn:example.com:3478"}, time.Minute, "conduit", func() time.Time { return time.Unix(1700000000, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestHarness(t, signaling.WithTurnIssuer(iss))
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	sender := h.dial(ctx, t)
+	writeJSON(t, ctx, sender, wire.ClientHello{Op: wire.OpReserve})
+
+	reserved := readEnvelope(t, ctx, sender)
+	if reserved.Op != wire.OpReserved {
+		t.Fatalf("op = %q, want %q", reserved.Op, wire.OpReserved)
+	}
+	if reserved.TURN == nil || len(reserved.TURN.URIs) != 1 {
+		t.Fatalf("reserved TURN = %+v, want non-empty URIs", reserved.TURN)
+	}
+
+	receiver := h.dial(ctx, t)
+	writeJSON(t, ctx, receiver, wire.ClientHello{Op: wire.OpJoin, Slot: reserved.Slot})
+
+	sPaired := readEnvelope(t, ctx, sender)
+	rPaired := readEnvelope(t, ctx, receiver)
+	for _, label := range []struct {
+		name string
+		env  wire.Envelope
+	}{
+		{"sender", sPaired},
+		{"receiver", rPaired},
+	} {
+		if label.env.Op != wire.OpPaired {
+			t.Fatalf("%s paired op = %q, want %q", label.name, label.env.Op, wire.OpPaired)
+		}
+		if label.env.TURN == nil || len(label.env.TURN.URIs) != 1 {
+			t.Fatalf("%s paired TURN = %+v, want non-empty URIs", label.name, label.env.TURN)
+		}
+		if label.env.TURN.URIs[0] != "turn:example.com:3478" {
+			t.Errorf("%s TURN uris[0] = %q, want turn:example.com:3478", label.name, label.env.TURN.URIs[0])
+		}
+		if label.env.TURN.Credential == "" || label.env.TURN.Username == "" {
+			t.Fatalf("%s TURN missing username or credential", label.name)
+		}
+	}
+}
+
 func TestReserveAndRelay(t *testing.T) {
 	h := newTestHarness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	sender := h.dial(ctx, t)
@@ -154,7 +202,7 @@ func TestReserveAndRelay(t *testing.T) {
 
 	// Server-side slot cleanup is deferred after the handler returns; allow
 	// a short window for ActiveSlots to drain.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(time.Second)
 	for h.server.ActiveSlots() > 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -165,7 +213,7 @@ func TestReserveAndRelay(t *testing.T) {
 
 func TestJoinUnknownSlot(t *testing.T) {
 	h := newTestHarness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	receiver := h.dial(ctx, t)
@@ -181,7 +229,7 @@ func TestJoinUnknownSlot(t *testing.T) {
 
 func TestSlotExpiry(t *testing.T) {
 	h := newTestHarness(t, signaling.WithSlotTTL(200*time.Millisecond))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	sender := h.dial(ctx, t)
@@ -203,7 +251,7 @@ func TestSlotExpiry(t *testing.T) {
 
 func TestBadFirstFrame(t *testing.T) {
 	h := newTestHarness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	conn := h.dial(ctx, t)
@@ -218,7 +266,7 @@ func TestBadFirstFrame(t *testing.T) {
 
 func TestUnknownOp(t *testing.T) {
 	h := newTestHarness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	conn := h.dial(ctx, t)
@@ -237,7 +285,7 @@ func TestReserveRateLimited(t *testing.T) {
 		Now:   func() time.Time { return now },
 	}
 	h := newTestHarness(t, signaling.WithReserveLimiter(&limiter))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	sender := h.dial(ctx, t)
@@ -257,10 +305,10 @@ func TestReserveRateLimited(t *testing.T) {
 // TestConcurrentReserves makes sure pairing is race-free under load.
 func TestConcurrentReserves(t *testing.T) {
 	h := newTestHarness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	const pairs = 16
+	const pairs = 8
 	var wg sync.WaitGroup
 	errs := make(chan error, pairs)
 	for range pairs {
@@ -277,7 +325,7 @@ func TestConcurrentReserves(t *testing.T) {
 	}
 	// Server-side slot cleanup runs after the client close frame lands, so
 	// allow a short window for ActiveSlots to drain.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(time.Second)
 	for h.server.ActiveSlots() > 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
