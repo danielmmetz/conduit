@@ -39,57 +39,45 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 	fs := flag.NewFlagSet("conduit-server", flag.ContinueOnError)
 	var (
 		addr          string
-		slotTTL       time.Duration
-		helloTimeout  time.Duration
 		reservePerMin float64
 		reserveBurst  int
 		joinPerMin    float64
 		joinBurst     int
-		idleTTL       time.Duration
 		trustXFF      bool
 		turnSecret    string
 		turnURIs      stringList
-		turnTTL       time.Duration
-		turnPrefix    string
 	)
 	fs.StringVar(&addr, "addr", ":8080", "listen address")
-	fs.DurationVar(&slotTTL, "slot-ttl", 10*time.Minute, "how long a reserved slot waits for a receiver")
-	fs.DurationVar(&helloTimeout, "hello-timeout", 10*time.Second, "how long to wait for the client's first frame")
 	fs.Float64Var(&reservePerMin, "reserve-per-min", 30, "reserve attempts per minute per IP (0 disables)")
 	fs.IntVar(&reserveBurst, "reserve-burst", 10, "reserve burst size")
 	fs.Float64Var(&joinPerMin, "join-per-min", 60, "join attempts per minute per IP (0 disables)")
 	fs.IntVar(&joinBurst, "join-burst", 20, "join burst size")
-	fs.DurationVar(&idleTTL, "rate-idle-ttl", 15*time.Minute, "evict per-IP rate limit state after this idle period")
 	fs.BoolVar(&trustXFF, "trust-xff", false, "derive source IP from X-Forwarded-For (only when fronted by a trusted proxy)")
 	fs.StringVar(&turnSecret, "turn-secret", "", "shared secret for RFC 8489 TURN credentials (empty disables issuance)")
 	fs.Var(&turnURIs, "turn-uri", "TURN URI to advertise (repeat or comma-separate; e.g. turn:turn.example:3478)")
-	fs.DurationVar(&turnTTL, "turn-ttl", 10*time.Minute, "TTL embedded in TURN credentials")
-	fs.StringVar(&turnPrefix, "turn-prefix", "conduit", "suffix appended to TURN usernames after the expiry timestamp")
 	if err := ff.Parse(fs, os.Args[1:], ff.WithEnvVarPrefix("CONDUIT_SERVER")); err != nil {
 		return fmt.Errorf("parsing flags: %w", err)
 	}
 
 	opts := []signaling.Option{
-		signaling.WithSlotTTL(slotTTL),
-		signaling.WithHelloTimeout(helloTimeout),
 		signaling.WithTrustXForwardedFor(trustXFF),
 	}
 	if reservePerMin > 0 {
 		opts = append(opts, signaling.WithReserveLimiter(&ratelimit.KeyedLimiter{
 			Rate:    rate.Limit(reservePerMin / 60),
 			Burst:   reserveBurst,
-			IdleTTL: idleTTL,
+			IdleTTL: 15 * time.Minute,
 		}))
 	}
 	if joinPerMin > 0 {
 		opts = append(opts, signaling.WithJoinLimiter(&ratelimit.KeyedLimiter{
 			Rate:    rate.Limit(joinPerMin / 60),
 			Burst:   joinBurst,
-			IdleTTL: idleTTL,
+			IdleTTL: 15 * time.Minute,
 		}))
 	}
 	if turnSecret != "" {
-		turnIss, err := turnauth.NewIssuer([]byte(turnSecret), turnURIs, turnTTL, turnPrefix, time.Now)
+		turnIss, err := turnauth.NewIssuer([]byte(turnSecret), turnURIs, 10*time.Minute, "conduit", time.Now)
 		if err != nil {
 			return fmt.Errorf("creating turn issuer: %w", err)
 		}
