@@ -360,7 +360,10 @@ func TestSendRecvStdinStdoutRoundTrip(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	// Longer budget than the other full-stack tests: stdin has been the first
+	// to tip over when ICE convergence slows down alongside concurrent rtc
+	// test packages in `go test ./...`.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 

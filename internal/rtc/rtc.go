@@ -50,6 +50,17 @@ type signalMsg struct {
 	SDP  string `json:"sdp"`
 }
 
+// isAnyOf reports whether err matches any of targets via errors.Is. Returns
+// false for a nil err.
+func isAnyOf(err error, targets ...error) bool {
+	for _, t := range targets {
+		if errors.Is(err, t) {
+			return true
+		}
+	}
+	return false
+}
+
 // teardownSignal is exchanged bidirectionally on the signaling connection
 // after the encrypted payload has been fully transferred at the application
 // layer. Each peer sends teardownSignal once its own half of the transfer is
@@ -165,7 +176,7 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 
 	raw, werr := openWait.wait(ctx)
 	if werr != nil {
-		if errors.Is(werr, context.Canceled) || errors.Is(werr, context.DeadlineExceeded) {
+		if isAnyOf(werr, context.Canceled, context.DeadlineExceeded) {
 			return fmt.Errorf("sending: waiting for open: %w", werr)
 		}
 		return fmt.Errorf("sending: %w", werr)
@@ -173,10 +184,10 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 
 	// Ack reader runs concurrently with the payload writer: the receiver
 	// sends tagAck frames back on the same data channel, and we surface
-	// them through cfg.OnRemoteProgress. The goroutine terminates when
-	// raw.Close() unblocks its Read, which the deferred cleanup below
-	// guarantees on every return path. Skip the goroutine entirely when the
-	// caller did not supply a callback so we do not spin up unused work.
+	// them through cfg.OnRemoteProgress. readAcks is ctx-aware (it spawns
+	// its own watcher that closes raw on ctx.Done), so the goroutine is
+	// guaranteed to exit on either a clean peer close or ctx cancellation —
+	// which lets the caller synchronously ackEG.Wait() below.
 	var ackEG errgroup.Group
 	defer func() {
 		_ = raw.Close()
@@ -184,11 +195,10 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 	}()
 	if cfg.OnRemoteProgress != nil {
 		ackEG.Go(func() error {
-			err := readAcks(raw, cfg.OnRemoteProgress)
-			if err == nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-				return nil
+			err := readAcks(ctx, raw, cfg.OnRemoteProgress)
+			if err != nil && !isAnyOf(err, io.EOF, io.ErrClosedPipe, context.Canceled, context.DeadlineExceeded) {
+				cfg.Logger.DebugContext(ctx, "ack reader exit", slog.String("err", err.Error()))
 			}
-			cfg.Logger.DebugContext(ctx, "ack reader exit", slog.String("err", err.Error()))
 			return nil
 		})
 	}
@@ -211,6 +221,12 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 	if err := tw.Close(); err != nil {
 		return fmt.Errorf("sending: finalizing framing: %w", err)
 	}
+	// Block teardown until the ack reader has fully drained. readAcks is
+	// ctx-aware, so this Wait is bounded by ctx — no select/bridge needed.
+	// The barrier matters: the deferred raw.Close must not fire while the
+	// reader is still dequeuing buffered frames from pion, or we drop the
+	// final ack.
+	_ = ackEG.Wait()
 	if err := exchangeTeardown(ctx, sig, key); err != nil {
 		return fmt.Errorf("sending: %w", err)
 	}
@@ -271,7 +287,7 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 
 	raw, werr := openWait.wait(ctx)
 	if werr != nil {
-		if errors.Is(werr, context.Canceled) || errors.Is(werr, context.DeadlineExceeded) {
+		if isAnyOf(werr, context.Canceled, context.DeadlineExceeded) {
 			return fmt.Errorf("receiving: waiting for open: %w", werr)
 		}
 		return fmt.Errorf("receiving: %w", werr)
@@ -289,6 +305,13 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 	}
 	if err := aw.Flush(); err != nil {
 		cfg.Logger.DebugContext(ctx, "flushing final ack", slog.String("err", err.Error()))
+	}
+	// Close the data channel before signaling teardown so the peer's ack
+	// reader drains all pending ack frames via SCTP EOF. Closing after
+	// teardown races with the sender's deferred local close and can drop the
+	// final ack.
+	if err := raw.Close(); err != nil {
+		cfg.Logger.DebugContext(ctx, "closing data channel", slog.String("err", err.Error()))
 	}
 	if err := exchangeTeardown(ctx, sig, key); err != nil {
 		return fmt.Errorf("receiving: %w", err)

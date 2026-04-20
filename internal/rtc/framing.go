@@ -1,9 +1,11 @@
 package rtc
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // The data channel framing prefixes each outbound message with a one-byte
@@ -130,16 +132,37 @@ func writeAck(w io.Writer, total int64) error {
 
 // readAcks loops reading tagged messages from r; for each tagAck frame it
 // invokes cb with the cumulative total. Returns when r.Read returns any
-// error (io.EOF / io.ErrClosedPipe on clean shutdown, or a real failure).
+// error (io.EOF / io.ErrClosedPipe on clean shutdown, or a real failure) or
+// when ctx is cancelled — in which case a watcher goroutine closes r to
+// unblock the in-flight Read, and the returned error wraps ctx.Err().
 //
 // Unknown tags are tolerated silently for forward compat; the sender only
 // ever expects tagAck over the receiver→sender direction, but a future peer
 // could layer new control frames without breaking older senders.
-func readAcks(r io.Reader, cb func(int64)) error {
+func readAcks(ctx context.Context, r io.ReadCloser, cb func(int64)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	// Watcher forces r.Read to unblock when ctx fires. The derived ctx is
+	// also cancelled when readAcks returns naturally (via the defer below),
+	// so the watcher always terminates; closing r at that point is redundant
+	// but harmless because the outer caller's defer closes it anyway.
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		<-ctx.Done()
+		_ = r.Close()
+	})
+	// cancel before wg.Wait so the watcher unblocks and can be joined.
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+
 	msg := make([]byte, maxFrameSize)
 	for {
 		n, err := r.Read(msg)
 		if err != nil {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("reading ack frame: %w", err)
+			}
 			return err
 		}
 		if n == 0 {

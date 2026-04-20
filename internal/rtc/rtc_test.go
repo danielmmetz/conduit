@@ -18,7 +18,11 @@ import (
 func TestSendRecvRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	// Pion ICE over real loopback UDP can take several seconds to converge
+	// when the rtc test package runs in parallel with itself (each test spins
+	// up its own PeerConnection). Give enough headroom to survive contention
+	// without masking true stalls.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	a, b := newPipeConn()
@@ -61,7 +65,9 @@ func TestSendRecvRoundTrip(t *testing.T) {
 func TestSendReceivesAcks(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	// See TestSendRecvRoundTrip: ICE convergence under parallel load needs
+	// generous headroom so we do not flake on data-channel open.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	a, b := newPipeConn()
