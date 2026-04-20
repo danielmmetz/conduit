@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,6 +49,58 @@ func TestSendRecvRoundTrip(t *testing.T) {
 
 	if !bytes.Equal(got.Bytes(), payload) {
 		t.Fatalf("payload mismatch: got %d bytes, want %d bytes", got.Len(), len(payload))
+	}
+}
+
+// TestSendReceivesAcks confirms the sender's OnRemoteProgress callback is
+// fired with a non-zero cumulative byte count once the receiver has fully
+// drained the payload. We can't assert a specific number of acks because
+// threshold-based emission + the receiver's final Flush together mean one
+// call for a small payload, multiple for a big one — but the final total
+// must match the payload size for correctness.
+func TestSendReceivesAcks(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	a, b := newPipeConn()
+	key := make([]byte, wire.SessionKeySize)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+
+	// Exceed the ack threshold (256 KiB) so we get at least one intra-stream
+	// ack on top of the final flush — covers both code paths.
+	payload := bytes.Repeat([]byte("a"), 512*1024)
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+
+	var last atomic.Int64
+	cfgSend := rtc.Config{
+		Logger:           logger.With("role", "send"),
+		OnRemoteProgress: func(n int64) { last.Store(n) },
+	}
+
+	sendErr := make(chan error, 1)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	wg.Go(func() {
+		sendErr <- rtc.Send(ctx, a, key, cfgSend, bytes.NewReader(payload))
+	})
+
+	var got bytes.Buffer
+	recvErr := rtc.Recv(ctx, b, key, rtc.Config{Logger: logger.With("role", "recv")}, &got)
+	sErr := <-sendErr
+	if recvErr != nil {
+		t.Fatalf("recv: %v (send err=%v)", recvErr, sErr)
+	}
+	if sErr != nil {
+		t.Fatalf("send: %v", sErr)
+	}
+	// Final ack must report the full payload size; intermediate acks may be
+	// smaller but the last one equals total bytes received.
+	if got := last.Load(); got != int64(len(payload)) {
+		t.Fatalf("last ack = %d, want %d", got, len(payload))
 	}
 }
 

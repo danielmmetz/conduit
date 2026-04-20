@@ -163,6 +163,7 @@
       globalThis.conduit.send(
         server,
         buf,
+        f.name,
         function onCode(code) {
           codeText.textContent = code;
           sendCode.hidden = false;
@@ -218,7 +219,7 @@
           setBar(recvBar, 1);
           setStatus(recvStatus, "Receiving… " + n + " bytes", null);
         },
-        function onDone(err, data) {
+        function onDone(err, data, filename) {
           recvProgress.hidden = true;
           recvProgress.classList.remove("indet");
           if (err != null && err !== undefined) {
@@ -229,7 +230,7 @@
           const blob = new Blob([bytes], { type: "application/octet-stream" });
           const url = URL.createObjectURL(blob);
           recvLink.href = url;
-          recvLink.download = "conduit-received.bin";
+          recvLink.download = filename || "conduit-received.bin";
           recvDownload.hidden = false;
           setStatus(recvStatus, "Received " + bytes.length + " bytes.", "ok");
         }

@@ -1,6 +1,7 @@
 package rtc
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 )
@@ -11,9 +12,15 @@ import (
 // propagates as io.EOF on the detached reader, but the JS RTCDataChannel
 // exposes no per-direction close; wrapping both sides with a tag byte gives
 // uniform behavior across platforms.
+//
+// Frames travel both directions: sender → receiver carries tagData /
+// tagEOF (payload ciphertext); receiver → sender carries tagAck (progress
+// reports). Because only one peer writes each tag class, the two directions
+// do not collide on a shared data channel.
 const (
-	tagData byte = 0 // the remainder of the message is payload ciphertext
-	tagEOF  byte = 1 // no more messages will follow; reader surfaces io.EOF
+	tagData byte = 0 // sender → receiver: the remainder is payload ciphertext
+	tagEOF  byte = 1 // sender → receiver: no more payload frames will follow
+	tagAck  byte = 2 // receiver → sender: cumulative plaintext bytes received
 )
 
 // maxFrameSize bounds the receive buffer for a single DC message. Age's
@@ -103,4 +110,99 @@ func (t *tagReader) Read(p []byte) (int, error) {
 	default:
 		return 0, fmt.Errorf("unknown frame tag %d", t.msg[0])
 	}
+}
+
+// ackFrameSize is the on-wire size of a tagAck frame: one tag byte + int64
+// big-endian total. Fits in a single data-channel message.
+const ackFrameSize = 1 + 8
+
+// writeAck emits a single tagAck data-channel message carrying the cumulative
+// plaintext byte count received so far. Called by the recv side.
+func writeAck(w io.Writer, total int64) error {
+	var buf [ackFrameSize]byte
+	buf[0] = tagAck
+	binary.BigEndian.PutUint64(buf[1:], uint64(total))
+	if _, err := w.Write(buf[:]); err != nil {
+		return fmt.Errorf("writing ack frame: %w", err)
+	}
+	return nil
+}
+
+// readAcks loops reading tagged messages from r; for each tagAck frame it
+// invokes cb with the cumulative total. Returns when r.Read returns any
+// error (io.EOF / io.ErrClosedPipe on clean shutdown, or a real failure).
+//
+// Unknown tags are tolerated silently for forward compat; the sender only
+// ever expects tagAck over the receiver→sender direction, but a future peer
+// could layer new control frames without breaking older senders.
+func readAcks(r io.Reader, cb func(int64)) error {
+	msg := make([]byte, maxFrameSize)
+	for {
+		n, err := r.Read(msg)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("reading ack frame: empty message")
+		}
+		if msg[0] != tagAck {
+			continue
+		}
+		if n != ackFrameSize {
+			return fmt.Errorf("reading ack frame: got %d bytes, want %d", n, ackFrameSize)
+		}
+		total := int64(binary.BigEndian.Uint64(msg[1:n]))
+		if cb != nil {
+			cb(total)
+		}
+	}
+}
+
+// ackingWriter wraps the receiver's sink with a counter; every ackThreshold
+// plaintext bytes written, it emits a tagAck frame back to raw so the sender
+// can surface peer-side progress. A final ack is emitted on Flush().
+type ackingWriter struct {
+	dst          io.Writer
+	raw          io.Writer
+	written      int64
+	sinceLastAck int64
+	ackThreshold int64
+}
+
+// defaultAckThreshold bounds ack frequency. At 256 KiB/ack and a 64 KiB age
+// chunk size, one ack per ~4 payload chunks — enough resolution for a
+// progress bar without flooding the reverse channel on fast local transfers.
+const defaultAckThreshold = 256 * 1024
+
+func newAckingWriter(dst, raw io.Writer) *ackingWriter {
+	return &ackingWriter{dst: dst, raw: raw, ackThreshold: defaultAckThreshold}
+}
+
+func (a *ackingWriter) Write(p []byte) (int, error) {
+	n, err := a.dst.Write(p)
+	if n > 0 {
+		a.written += int64(n)
+		a.sinceLastAck += int64(n)
+		if a.sinceLastAck >= a.ackThreshold {
+			if aerr := writeAck(a.raw, a.written); aerr != nil {
+				return n, fmt.Errorf("emitting ack: %w", aerr)
+			}
+			a.sinceLastAck = 0
+		}
+	}
+	return n, err
+}
+
+// Flush emits a final ack with the cumulative count so the sender sees an
+// accurate final total even when the stream ends inside an ack window.
+// Best-effort; any error is wrapped and returned.
+func (a *ackingWriter) Flush() error {
+	if a.written == 0 {
+		return nil
+	}
+	if err := writeAck(a.raw, a.written); err != nil {
+		return fmt.Errorf("flushing final ack: %w", err)
+	}
+	a.sinceLastAck = 0
+	return nil
 }

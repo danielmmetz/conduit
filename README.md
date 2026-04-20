@@ -63,6 +63,9 @@ For a standalone relay that matches `conduit-server` credentials, build `conduit
 ```bash
 ./conduit send --server 'http://localhost:8080' --text 'hello'
 ./conduit send --server 'http://localhost:8080' ./myfile.bin
+./conduit send --server 'http://localhost:8080' ./mydir              # streams as tar
+./conduit send --server 'http://localhost:8080' a.txt b.txt c.txt    # multiple files → tar
+tar c ./mydir | ./conduit send --server 'http://localhost:8080' -    # stdin
 ```
 
 **Receive**:
@@ -70,7 +73,11 @@ For a standalone relay that matches `conduit-server` credentials, build `conduit
 ```bash
 ./conduit recv --server 'http://localhost:8080' '42-word-word-word'
 ./conduit recv --server 'http://localhost:8080' -o out.bin '42-word-word-word'
+./conduit recv --server 'http://localhost:8080' -o ./dest '42-word-word-word'  # dir/tar extracts here
+./conduit recv --server 'http://localhost:8080' '42-word-word-word' -          # write to stdout
 ```
+
+Without `-o`, files land at the sender's filename and directories extract into the current working directory.
 
 Relay behavior:
 
@@ -87,6 +94,8 @@ The server embeds the SPA under `cmd/conduit-server/web/`. After `go generate ./
 - Rendezvous and blind relay over **WebSocket** (`/ws`)
 - **SPAKE2** + **age** for session key and encrypted signaling/payload
 - **WebRTC** data channel for the encrypted stream; **TURN** optional
+- Payload shapes: single file, directory (streaming PAX tar), multi-file,
+  stdin → stdout, with receiver→sender progress acks inside the encrypted stream
 - **CLI** (`conduit`) and **browser** (Go→WASM + static JS) clients
 
 See `PLAN.md` for design notes and the full roadmap.

@@ -13,11 +13,11 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/danielmmetz/conduit/internal/client"
 	"github.com/danielmmetz/conduit/internal/wire"
+	"github.com/danielmmetz/conduit/internal/xfer"
 	"github.com/peterbourgon/ff/v3"
 	"github.com/peterbourgon/ff/v3/ffcli"
 )
@@ -26,7 +26,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if err := mainE(ctx, logger, os.Stdout, os.Args[1:]); err != nil {
+	if err := mainE(ctx, logger, os.Stdin, os.Stdout, os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) || errors.Is(err, context.Canceled) {
 			if ctx.Err() == nil {
 				os.Exit(2)
@@ -40,13 +40,13 @@ func main() {
 	}
 }
 
-func mainE(ctx context.Context, logger *slog.Logger, out io.Writer, args []string) error {
+func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out io.Writer, args []string) error {
 	root := ffcli.Command{
 		Name:       "conduit",
 		ShortUsage: "conduit <send|recv> [flags] ...",
 		ShortHelp:  "Share text or files between two devices over a rendezvous server.",
 		Subcommands: []*ffcli.Command{
-			sendCmd(logger, out),
+			sendCmd(logger, stdin, out),
 			recvCmd(logger, out),
 		},
 		Exec: func(context.Context, []string) error { return flag.ErrHelp },
@@ -54,7 +54,7 @@ func mainE(ctx context.Context, logger *slog.Logger, out io.Writer, args []strin
 	return root.ParseAndRun(ctx, args)
 }
 
-func sendCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
+func sendCmd(logger *slog.Logger, stdin io.Reader, out io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text string
 	var noRelay, forceRelay bool
@@ -64,7 +64,7 @@ func sendCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 	fs.BoolVar(&forceRelay, "force-relay", false, "force TURN; gather only relay candidates (useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "send",
-		ShortUsage: "conduit send [--text <message> | <path>] [--server URL]",
+		ShortUsage: "conduit send [--text <message> | <path>... | -] [--server URL]",
 		ShortHelp:  "Reserve a slot and stream a payload to the peer that joins it.",
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
@@ -73,15 +73,18 @@ func sendCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 			if err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
-			src, err := openSource(text, args)
+			src, err := openSource(text, args, stdin)
 			if err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
 			defer src.Close()
-			if err := client.Send(ctx, logger, server, policy, src, func(code string) {
+			onProgress := func(total int64) {
+				logger.Debug("peer acked bytes", slog.Int64("total", total))
+			}
+			if err := client.Send(ctx, logger, server, policy, src.Preamble, src.Reader, func(code string) {
 				fmt.Fprintf(out, "code: %s\n", code)
 				fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
-			}); err != nil {
+			}, onProgress); err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
 			fmt.Fprintln(out, "sent")
@@ -95,12 +98,12 @@ func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 	var server, outPath string
 	var noRelay, forceRelay bool
 	fs.StringVar(&server, "server", "http://localhost:8080", "signaling server base URL")
-	fs.StringVar(&outPath, "o", "", "write the received payload to this path (default: stdout)")
+	fs.StringVar(&outPath, "o", "", "write the received payload to this path ('-' for stdout; default is the sender's filename for files or the working directory for directories)")
 	fs.BoolVar(&noRelay, "no-relay", false, "refuse TURN; fail rather than fall back to a relayed path")
 	fs.BoolVar(&forceRelay, "force-relay", false, "force TURN; gather only relay candidates (useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "recv",
-		ShortUsage: "conduit recv <code> [-o PATH] [--server URL]",
+		ShortUsage: "conduit recv <code> [-o PATH | -] [--server URL]",
 		ShortHelp:  "Join a slot and receive a payload from the sender.",
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
@@ -109,8 +112,8 @@ func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 			if err != nil {
 				return fmt.Errorf("running recv: %w", err)
 			}
-			if len(args) != 1 {
-				return fmt.Errorf("usage: conduit recv <code>")
+			if len(args) < 1 {
+				return fmt.Errorf("usage: conduit recv <code> [-]")
 			}
 			code, err := wire.ParseCode(args[0])
 			if err != nil {
@@ -119,12 +122,21 @@ func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 			if len(code.Words) == 0 {
 				return fmt.Errorf("parsing recv code: %q is missing the word portion", args[0])
 			}
-			dst, err := openSink(outPath, out)
-			if err != nil {
-				return fmt.Errorf("running recv: %w", err)
+			// Positional "-" after the code is shorthand for "-o -".
+			sinkOutPath := outPath
+			if len(args) == 2 && args[1] == xfer.StdoutMarker {
+				if sinkOutPath != "" && sinkOutPath != xfer.StdoutMarker {
+					return fmt.Errorf("running recv: positional %q conflicts with -o %q", xfer.StdoutMarker, sinkOutPath)
+				}
+				sinkOutPath = xfer.StdoutMarker
+			} else if len(args) > 1 {
+				return fmt.Errorf("usage: conduit recv <code> [-]")
 			}
-			defer dst.Close()
-			if err := client.Recv(ctx, logger, server, code, policy, dst); err != nil {
+			opts := xfer.SinkOptions{OutPath: sinkOutPath, Stdout: out}
+			open := func(pre wire.Preamble) (io.WriteCloser, error) {
+				return xfer.OpenSink(pre, opts)
+			}
+			if err := client.Recv(ctx, logger, server, code, policy, open); err != nil {
 				return fmt.Errorf("running recv: %w", err)
 			}
 			return nil
@@ -132,54 +144,21 @@ func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 	}
 }
 
-// openSource resolves the payload reader from --text or a positional path arg.
-// Exactly one must be provided. On success, the result is always an
-// io.ReadCloser (io.NopCloser for in-memory text; *os.File for paths).
-func openSource(text string, args []string) (io.ReadCloser, error) {
-	switch {
-	case text != "" && len(args) > 0:
+// openSource resolves the payload Source from --text, positional paths, or "-"
+// stdin. Exactly one route must apply; mixing --text with paths is an error.
+func openSource(text string, args []string, stdin io.Reader) (*xfer.Source, error) {
+	if text != "" && len(args) > 0 {
 		return nil, fmt.Errorf("resolving send source: pass either --text or a path, not both")
-	case text != "":
-		return io.NopCloser(strings.NewReader(text)), nil
-	case len(args) == 1:
-		f, err := os.Open(args[0])
-		if err != nil {
-			return nil, fmt.Errorf("opening %s: %w", args[0], err)
-		}
-		return f, nil
-	case len(args) == 0:
-		return nil, fmt.Errorf("resolving send source: pass --text <message> or a path")
-	default:
-		return nil, fmt.Errorf("resolving send source: expected exactly one path, got %d", len(args))
 	}
-}
-
-// writeSink is an io.WriteCloser. The stdlib provides io.NopCloser for readers
-// but not an equivalent for arbitrary io.Writers (stdout, test doubles), so we
-// use an optional close hook: nil means Close is a no-op.
-type writeSink struct {
-	w     io.Writer
-	close func() error
-}
-
-func (s writeSink) Write(p []byte) (int, error) { return s.w.Write(p) }
-
-func (s writeSink) Close() error {
-	if s.close == nil {
-		return nil
+	if text != "" {
+		return xfer.OpenText(text), nil
 	}
-	return s.close()
-}
-
-// openSink resolves the payload sink from -o or falls back to fallback.
-// On success, the result is always an io.WriteCloser.
-func openSink(path string, fallback io.Writer) (io.WriteCloser, error) {
-	if path == "" {
-		return writeSink{w: fallback}, nil
+	if len(args) == 0 {
+		return nil, fmt.Errorf("resolving send source: pass --text <message>, one or more paths, or '-' for stdin")
 	}
-	f, err := os.Create(path)
+	src, err := xfer.OpenPaths(args, stdin)
 	if err != nil {
-		return nil, fmt.Errorf("creating %s: %w", path, err)
+		return nil, fmt.Errorf("resolving send source: %w", err)
 	}
-	return writeSink{w: f, close: f.Close}, nil
+	return src, nil
 }

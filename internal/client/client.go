@@ -3,7 +3,9 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,9 +50,19 @@ func (r RelayPolicy) transportPolicy() webrtc.ICETransportPolicy {
 	return webrtc.ICETransportPolicyAll
 }
 
+// SinkOpener resolves the destination for an incoming payload once the
+// receiver has decoded the preamble. The returned writer receives the
+// plaintext payload bytes; Close is invoked after the bytes are consumed.
+type SinkOpener func(wire.Preamble) (io.WriteCloser, error)
+
 // Send reserves a slot, invokes onCode with the human-readable code (before
-// waiting for the peer), completes PAKE + WebRTC, and streams src to the receiver.
-func Send(ctx context.Context, logger *slog.Logger, server string, policy RelayPolicy, src io.Reader, onCode func(code string)) error {
+// waiting for the peer), completes PAKE + WebRTC, and streams src to the
+// receiver. The preamble is written inside the age-encrypted stream ahead of
+// the payload so the receiver can pick a sink (single file / tar extractor /
+// stdout) without the server or TURN relay ever observing filenames or sizes.
+// onProgress, if non-nil, is called each time the peer acknowledges additional
+// plaintext bytes; treat the argument as a cumulative total (best-effort).
+func Send(ctx context.Context, logger *slog.Logger, server string, policy RelayPolicy, preamble wire.Preamble, src io.Reader, onCode func(code string), onProgress func(int64)) error {
 	wsURL, err := wsURLFor(server)
 	if err != nil {
 		return fmt.Errorf("resolving websocket URL: %w", err)
@@ -107,19 +119,28 @@ func Send(ctx context.Context, logger *slog.Logger, server string, policy RelayP
 		ice = nil
 	}
 	cfg := rtc.Config{
-		ICEServers:      ice,
-		TransportPolicy: policy.transportPolicy(),
-		Logger:          logger,
+		ICEServers:       ice,
+		TransportPolicy:  policy.transportPolicy(),
+		Logger:           logger,
+		OnRemoteProgress: onProgress,
 	}
-	if err := rtc.Send(ctx, wsMsgConn{conn: conn}, key, cfg, src); err != nil {
+	var preambleBuf bytes.Buffer
+	if err := wire.WritePreamble(&preambleBuf, preamble); err != nil {
+		return fmt.Errorf("framing preamble: %w", err)
+	}
+	combined := io.MultiReader(&preambleBuf, src)
+	if err := rtc.Send(ctx, wsMsgConn{conn: conn}, key, cfg, combined); err != nil {
 		return fmt.Errorf("sending payload: %w", err)
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 	return nil
 }
 
-// Recv joins a slot, runs PAKE + WebRTC, and writes the decrypted payload to dst.
-func Recv(ctx context.Context, logger *slog.Logger, server string, code wire.Code, policy RelayPolicy, dst io.Writer) error {
+// Recv joins a slot, runs PAKE + WebRTC, parses the preamble off the head of
+// the encrypted stream, and forwards the remaining plaintext to the sink
+// produced by openSink. openSink is called exactly once, after the preamble is
+// decoded; the returned writer is closed when the transfer completes.
+func Recv(ctx context.Context, logger *slog.Logger, server string, code wire.Code, policy RelayPolicy, openSink SinkOpener) error {
 	wsURL, err := wsURLFor(server)
 	if err != nil {
 		return fmt.Errorf("resolving websocket URL: %w", err)
@@ -159,11 +180,100 @@ func Recv(ctx context.Context, logger *slog.Logger, server string, code wire.Cod
 		TransportPolicy: policy.transportPolicy(),
 		Logger:          logger,
 	}
-	if err := rtc.Recv(ctx, wsMsgConn{conn: conn}, key, cfg, dst); err != nil {
+	sink := &preambleSink{openSink: openSink}
+	if err := rtc.Recv(ctx, wsMsgConn{conn: conn}, key, cfg, sink); err != nil {
+		// Finalize the sink so partial writes are flushed to disk even on
+		// error paths; report the primary transport error, not the close
+		// follow-on.
+		_ = sink.Close()
 		return fmt.Errorf("receiving payload: %w", err)
+	}
+	if err := sink.Close(); err != nil {
+		return fmt.Errorf("closing receive sink: %w", err)
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 	return nil
+}
+
+// preambleSink is a state-machine io.Writer: the first frame of bytes written
+// to it is interpreted as a length-prefixed [wire.Preamble], after which the
+// sink calls openSink and forwards remaining bytes to the writer it returned.
+// Splitting the preamble across multiple Write calls (as happens when age's
+// chunked output straddles the boundary) is handled by buffering the unread
+// prefix until enough bytes have arrived.
+type preambleSink struct {
+	openSink SinkOpener
+
+	lenBuf  [4]byte
+	lenN    int    // bytes of length prefix consumed
+	bodyLen uint32 // announced preamble length, once lenN == 4
+	body    []byte // accumulated preamble bytes
+	sink    io.WriteCloser
+	preSeen bool
+}
+
+func (p *preambleSink) Write(b []byte) (int, error) {
+	total := len(b)
+	// Fill the 4-byte length prefix.
+	if p.lenN < 4 {
+		n := copy(p.lenBuf[p.lenN:], b)
+		p.lenN += n
+		b = b[n:]
+		if p.lenN < 4 {
+			return total, nil
+		}
+		p.bodyLen = binary.BigEndian.Uint32(p.lenBuf[:])
+		if p.bodyLen > wire.MaxPreambleBody {
+			return total, fmt.Errorf("reading preamble: announced %d bytes, max %d", p.bodyLen, wire.MaxPreambleBody)
+		}
+	}
+	// Fill the JSON body.
+	if !p.preSeen {
+		need := int(p.bodyLen) - len(p.body)
+		if need > 0 {
+			take := min(len(b), need)
+			p.body = append(p.body, b[:take]...)
+			b = b[take:]
+		}
+		if len(p.body) < int(p.bodyLen) {
+			return total, nil
+		}
+		pre, err := decodePreamble(p.body)
+		if err != nil {
+			return total, fmt.Errorf("reading preamble: %w", err)
+		}
+		sink, err := p.openSink(pre)
+		if err != nil {
+			return total, fmt.Errorf("opening sink: %w", err)
+		}
+		p.sink = sink
+		p.preSeen = true
+	}
+	// Forward any bytes remaining after the preamble.
+	if len(b) > 0 {
+		if _, err := p.sink.Write(b); err != nil {
+			return total, fmt.Errorf("writing payload to sink: %w", err)
+		}
+	}
+	return total, nil
+}
+
+func (p *preambleSink) Close() error {
+	if p.sink == nil {
+		return nil
+	}
+	if err := p.sink.Close(); err != nil {
+		return fmt.Errorf("closing sink: %w", err)
+	}
+	return nil
+}
+
+func decodePreamble(body []byte) (wire.Preamble, error) {
+	var pre wire.Preamble
+	if err := json.Unmarshal(body, &pre); err != nil {
+		return wire.Preamble{}, fmt.Errorf("decoding preamble: %w", err)
+	}
+	return pre, nil
 }
 
 func iceServersFromEnvelope(env wire.Envelope) []webrtc.ICEServer {

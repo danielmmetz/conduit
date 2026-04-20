@@ -32,10 +32,17 @@ import (
 // TransportPolicy defaults to ICETransportPolicyAll; set to
 // ICETransportPolicyRelay to force traffic through TURN (exercises the relay
 // path; fails closed if no TURN server is reachable).
+//
+// OnRemoteProgress, if set on the sender, is invoked each time the receiver
+// acknowledges additional plaintext bytes. The argument is the cumulative
+// total reported by the peer. Acks are best-effort and may be dropped if the
+// data channel tears down mid-transfer; callers must not treat them as
+// integrity information.
 type Config struct {
-	ICEServers      []webrtc.ICEServer
-	TransportPolicy webrtc.ICETransportPolicy
-	Logger          *slog.Logger
+	ICEServers       []webrtc.ICEServer
+	TransportPolicy  webrtc.ICETransportPolicy
+	Logger           *slog.Logger
+	OnRemoteProgress func(totalBytes int64)
 }
 
 type signalMsg struct {
@@ -163,7 +170,28 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 		}
 		return fmt.Errorf("sending: %w", werr)
 	}
-	defer raw.Close()
+
+	// Ack reader runs concurrently with the payload writer: the receiver
+	// sends tagAck frames back on the same data channel, and we surface
+	// them through cfg.OnRemoteProgress. The goroutine terminates when
+	// raw.Close() unblocks its Read, which the deferred cleanup below
+	// guarantees on every return path. Skip the goroutine entirely when the
+	// caller did not supply a callback so we do not spin up unused work.
+	var ackEG errgroup.Group
+	defer func() {
+		_ = raw.Close()
+		_ = ackEG.Wait()
+	}()
+	if cfg.OnRemoteProgress != nil {
+		ackEG.Go(func() error {
+			err := readAcks(raw, cfg.OnRemoteProgress)
+			if err == nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+				return nil
+			}
+			cfg.Logger.DebugContext(ctx, "ack reader exit", slog.String("err", err.Error()))
+			return nil
+		})
+	}
 
 	tw := newTagWriter(raw)
 	wc, err := wire.Encrypt(tw, key)
@@ -255,8 +283,12 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 	if err != nil {
 		return fmt.Errorf("receiving: starting decrypt: %w", err)
 	}
-	if _, err := io.Copy(dst, pr); err != nil {
+	aw := newAckingWriter(dst, raw)
+	if _, err := io.Copy(aw, pr); err != nil {
 		return fmt.Errorf("receiving: copying payload: %w", err)
+	}
+	if err := aw.Flush(); err != nil {
+		cfg.Logger.DebugContext(ctx, "flushing final ack", slog.String("err", err.Error()))
 	}
 	if err := exchangeTeardown(ctx, sig, key); err != nil {
 		return fmt.Errorf("receiving: %w", err)

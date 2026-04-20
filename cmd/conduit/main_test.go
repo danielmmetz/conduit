@@ -52,7 +52,7 @@ func TestSendRecvRoundTrip(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		defer close(codeCh)
-		if err := mainE(gctx, logger, sendOut, []string{"send", "--server", ts.URL, "--text", "hello conduit"}); err != nil {
+		if err := mainE(gctx, logger, nil, sendOut, []string{"send", "--server", ts.URL, "--text", "hello conduit"}); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
 		return nil
@@ -68,7 +68,7 @@ func TestSendRecvRoundTrip(t *testing.T) {
 		case <-gctx.Done():
 			return fmt.Errorf("recv: %w", gctx.Err())
 		}
-		if err := mainE(gctx, logger, &recvBuf, []string{"recv", "--server", ts.URL, code}); err != nil {
+		if err := mainE(gctx, logger, nil, &recvBuf, []string{"recv", "--server", ts.URL, code}); err != nil {
 			return fmt.Errorf("recv: %w", err)
 		}
 		return nil
@@ -112,7 +112,7 @@ func TestSendRecvFileRoundTrip(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		defer close(codeCh)
-		if err := mainE(gctx, logger, sendOut, []string{"send", "--server", ts.URL, sendPath}); err != nil {
+		if err := mainE(gctx, logger, nil, sendOut, []string{"send", "--server", ts.URL, sendPath}); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
 		return nil
@@ -128,7 +128,7 @@ func TestSendRecvFileRoundTrip(t *testing.T) {
 		case <-gctx.Done():
 			return fmt.Errorf("recv: %w", gctx.Err())
 		}
-		if err := mainE(gctx, logger, io.Discard, []string{"recv", "--server", ts.URL, "-o", recvPath, code}); err != nil {
+		if err := mainE(gctx, logger, nil, io.Discard, []string{"recv", "--server", ts.URL, "-o", recvPath, code}); err != nil {
 			return fmt.Errorf("recv: %w", err)
 		}
 		return nil
@@ -207,7 +207,7 @@ func TestSendRecvForceRelayRoundTrip(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		defer close(codeCh)
-		if err := mainE(gctx, logger, &sendOut, []string{"send", "--server", ts.URL, "--force-relay", "--text", payload}); err != nil {
+		if err := mainE(gctx, logger, nil, &sendOut, []string{"send", "--server", ts.URL, "--force-relay", "--text", payload}); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
 		return nil
@@ -223,7 +223,7 @@ func TestSendRecvForceRelayRoundTrip(t *testing.T) {
 		case <-gctx.Done():
 			return fmt.Errorf("recv: %w", gctx.Err())
 		}
-		if err := mainE(gctx, logger, &recvBuf, []string{"recv", "--server", ts.URL, "--force-relay", code}); err != nil {
+		if err := mainE(gctx, logger, nil, &recvBuf, []string{"recv", "--server", ts.URL, "--force-relay", code}); err != nil {
 			return fmt.Errorf("recv: %w", err)
 		}
 		return nil
@@ -261,6 +261,216 @@ func TestRelayPolicyConflict(t *testing.T) {
 	t.Parallel()
 	if _, err := client.RelayPolicyFromFlags(true, true); err == nil {
 		t.Fatal("RelayPolicyFromFlags(true, true) err = nil, want error")
+	}
+}
+
+// TestSendRecvDirectoryRoundTrip covers the directory-tar shape: the sender
+// streams a PAX tar of a small tree and the receiver extracts it into a
+// separate output directory, verifying both files and their contents
+// round-trip. This exercises the tar producer goroutine, the preamble
+// (kind="tar"), and the traversal-safe extractor together.
+func TestSendRecvDirectoryRoundTrip(t *testing.T) {
+	srv := signaling.NewServer(
+		slog.New(slog.NewTextHandler(t.Output(), nil)),
+		signaling.WithSlotTTL(2*time.Second),
+		signaling.WithHelloTimeout(2*time.Second),
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /ws", srv.HandleWS)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	srcRoot := filepath.Join(t.TempDir(), "tree")
+	if err := os.MkdirAll(filepath.Join(srcRoot, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "top.txt"), []byte("alpha"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "sub", "nested.txt"), []byte("bravo"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	dstRoot := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+
+	var sendBuf syncBuffer
+	codeCh := make(chan string, 1)
+	sendOut := &codeNotifyBuffer{buf: &sendBuf, ch: codeCh}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		defer close(codeCh)
+		if err := mainE(gctx, logger, nil, sendOut, []string{"send", "--server", ts.URL, srcRoot}); err != nil {
+			return fmt.Errorf("send: %w", err)
+		}
+		return nil
+	})
+	g.Go(func() error {
+		var code string
+		select {
+		case c, ok := <-codeCh:
+			if !ok {
+				return fmt.Errorf("recv: sender exited before code was available")
+			}
+			code = c
+		case <-gctx.Done():
+			return fmt.Errorf("recv: %w", gctx.Err())
+		}
+		if err := mainE(gctx, logger, nil, io.Discard, []string{"recv", "--server", ts.URL, "-o", dstRoot, code}); err != nil {
+			return fmt.Errorf("recv: %w", err)
+		}
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		t.Fatalf("send/recv dir: %v (sender out=%q)", err, sendBuf.String())
+	}
+
+	base := filepath.Base(srcRoot)
+	top, err := os.ReadFile(filepath.Join(dstRoot, base, "top.txt"))
+	if err != nil {
+		t.Fatalf("read top.txt: %v", err)
+	}
+	if string(top) != "alpha" {
+		t.Errorf("top.txt = %q, want %q", top, "alpha")
+	}
+	nested, err := os.ReadFile(filepath.Join(dstRoot, base, "sub", "nested.txt"))
+	if err != nil {
+		t.Fatalf("read nested.txt: %v", err)
+	}
+	if string(nested) != "bravo" {
+		t.Errorf("nested.txt = %q, want %q", nested, "bravo")
+	}
+}
+
+// TestSendRecvStdinStdoutRoundTrip exercises the streaming-stdin send source
+// (Size=-1) and the positional "-" stdout marker on the receiver. Because
+// stdin can't be seeked or pre-sized, the preamble should record size=-1 and
+// the payload should still round-trip intact end-to-end.
+func TestSendRecvStdinStdoutRoundTrip(t *testing.T) {
+	srv := signaling.NewServer(
+		slog.New(slog.NewTextHandler(t.Output(), nil)),
+		signaling.WithSlotTTL(2*time.Second),
+		signaling.WithHelloTimeout(2*time.Second),
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /ws", srv.HandleWS)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+
+	payload := bytes.Repeat([]byte("stdin payload chunk\n"), 64)
+	stdin := bytes.NewReader(payload)
+
+	var sendBuf, recvBuf syncBuffer
+	codeCh := make(chan string, 1)
+	sendOut := &codeNotifyBuffer{buf: &sendBuf, ch: codeCh}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		defer close(codeCh)
+		if err := mainE(gctx, logger, stdin, sendOut, []string{"send", "--server", ts.URL, "-"}); err != nil {
+			return fmt.Errorf("send: %w", err)
+		}
+		return nil
+	})
+	g.Go(func() error {
+		var code string
+		select {
+		case c, ok := <-codeCh:
+			if !ok {
+				return fmt.Errorf("recv: sender exited before code was available")
+			}
+			code = c
+		case <-gctx.Done():
+			return fmt.Errorf("recv: %w", gctx.Err())
+		}
+		// "-" positional means write payload to the out stream (stdout here).
+		if err := mainE(gctx, logger, nil, &recvBuf, []string{"recv", "--server", ts.URL, code, "-"}); err != nil {
+			return fmt.Errorf("recv: %w", err)
+		}
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		t.Fatalf("send/recv stdin: %v (sender out=%q)", err, sendBuf.String())
+	}
+	if !bytes.Equal(recvBuf.buf.Bytes(), payload) {
+		t.Fatalf("stdin round trip mismatch: got %d bytes, want %d", recvBuf.buf.Len(), len(payload))
+	}
+}
+
+// TestSendRecvMultiFileRoundTrip verifies multi-path send (→ tar stream)
+// extracts both files on the receive side under the caller-provided root.
+func TestSendRecvMultiFileRoundTrip(t *testing.T) {
+	srv := signaling.NewServer(
+		slog.New(slog.NewTextHandler(t.Output(), nil)),
+		signaling.WithSlotTTL(2*time.Second),
+		signaling.WithHelloTimeout(2*time.Second),
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /ws", srv.HandleWS)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	src := t.TempDir()
+	p1 := filepath.Join(src, "one.txt")
+	p2 := filepath.Join(src, "two.txt")
+	if err := os.WriteFile(p1, []byte("first"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(p2, []byte("second payload"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	dst := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+
+	var sendBuf syncBuffer
+	codeCh := make(chan string, 1)
+	sendOut := &codeNotifyBuffer{buf: &sendBuf, ch: codeCh}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		defer close(codeCh)
+		if err := mainE(gctx, logger, nil, sendOut, []string{"send", "--server", ts.URL, p1, p2}); err != nil {
+			return fmt.Errorf("send: %w", err)
+		}
+		return nil
+	})
+	g.Go(func() error {
+		var code string
+		select {
+		case c, ok := <-codeCh:
+			if !ok {
+				return fmt.Errorf("recv: sender exited before code was available")
+			}
+			code = c
+		case <-gctx.Done():
+			return fmt.Errorf("recv: %w", gctx.Err())
+		}
+		if err := mainE(gctx, logger, nil, io.Discard, []string{"recv", "--server", ts.URL, "-o", dst, code}); err != nil {
+			return fmt.Errorf("recv: %w", err)
+		}
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		t.Fatalf("send/recv multi-file: %v (sender out=%q)", err, sendBuf.String())
+	}
+
+	one, err := os.ReadFile(filepath.Join(dst, "one.txt"))
+	if err != nil || string(one) != "first" {
+		t.Errorf("one.txt = %q err=%v, want %q", one, err, "first")
+	}
+	two, err := os.ReadFile(filepath.Join(dst, "two.txt"))
+	if err != nil || string(two) != "second payload" {
+		t.Errorf("two.txt = %q err=%v, want %q", two, err, "second payload")
 	}
 }
 

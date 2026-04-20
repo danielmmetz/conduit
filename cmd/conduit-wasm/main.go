@@ -53,12 +53,12 @@ func (b *wasmBridge) startOp(f func()) {
 }
 
 const (
-	sendJSArgN = 5 // server, payload, onCode, onProgress, onDone
+	sendJSArgN = 6 // server, payload, filename, onCode, onProgress, onDone
 	recvJSArgN = 4 // server, code, onProgress, onDone
 )
 
-// sendJS(server, payload, onCode, onProgress, onDone)
-// onCode(code string) when the slot is reserved; onProgress(done, total int);
+// sendJS(server, payload, filename, onCode, onProgress, onDone)
+// onCode(code) when the slot is reserved; onProgress(done, total);
 // onDone(err) where err is null on success.
 func (b *wasmBridge) sendJS(parent context.Context, _ js.Value, args []js.Value) any {
 	if len(args) < sendJSArgN {
@@ -66,20 +66,24 @@ func (b *wasmBridge) sendJS(parent context.Context, _ js.Value, args []js.Value)
 	}
 	server := args[0].String()
 	payload := copyBytesFromJS(args[1])
-	onCode := args[2]
-	onProgress := args[3]
-	onDone := args[4]
+	filename := args[2].String()
+	onCode := args[3]
+	onProgress := args[4]
+	onDone := args[5]
 	if onDone.Type() != js.TypeFunction {
 		return js.Undefined()
 	}
 
 	b.startOp(func() {
-		b.runSend(parent, server, payload, onCode, onProgress, onDone)
+		b.runSend(parent, server, payload, filename, onCode, onProgress, onDone)
 	})
 	return js.Undefined()
 }
 
-func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte, onCode, onProgress, onDone js.Value) {
+func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte, filename string, onCode, onProgress, onDone js.Value) {
+	if filename == "" {
+		filename = "payload.bin"
+	}
 	pr := &progressReader{
 		r:     bytes.NewReader(payload),
 		total: int64(len(payload)),
@@ -89,11 +93,17 @@ func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte,
 			}
 		},
 	}
-	err := client.Send(ctx, b.logger, server, client.RelayAuto, pr, func(code string) {
+	preamble := wire.Preamble{
+		Kind: wire.PreambleKindFile,
+		Name: filename,
+		Size: int64(len(payload)),
+		MIME: "application/octet-stream",
+	}
+	err := client.Send(ctx, b.logger, server, client.RelayAuto, preamble, pr, func(code string) {
 		if onCode.Type() == js.TypeFunction && onCode.Truthy() {
 			onCode.Invoke(code)
 		}
-	})
+	}, nil)
 	if err != nil {
 		onDone.Invoke(err.Error())
 		return
@@ -102,8 +112,9 @@ func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte,
 }
 
 // recvJS(server, code, onProgress, onDone)
-// onProgress(bytesReceived int); onDone(err, data) where err is null on success
-// and data is a Uint8Array of the payload.
+// onProgress(bytesReceived) is invoked as payload arrives; onDone(err, data,
+// filename) where data is a Uint8Array of the payload and filename is the
+// name advertised in the preamble (empty for text/stdin shapes).
 func (b *wasmBridge) recvJS(parent context.Context, _ js.Value, args []js.Value) any {
 	if len(args) < recvJSArgN {
 		return js.Undefined()
@@ -125,11 +136,11 @@ func (b *wasmBridge) recvJS(parent context.Context, _ js.Value, args []js.Value)
 func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProgress, onDone js.Value) {
 	code, err := wire.ParseCode(codeStr)
 	if err != nil {
-		onDone.Invoke(err.Error(), js.Null())
+		onDone.Invoke(err.Error(), js.Null(), "")
 		return
 	}
 	if len(code.Words) == 0 {
-		onDone.Invoke("code is missing the word portion", js.Null())
+		onDone.Invoke("code is missing the word portion", js.Null(), "")
 		return
 	}
 	var buf bytes.Buffer
@@ -141,14 +152,30 @@ func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProg
 			}
 		},
 	}
-	err = client.Recv(ctx, b.logger, server, code, client.RelayAuto, pw)
+	var filename string
+	open := func(pre wire.Preamble) (io.WriteCloser, error) {
+		filename = pre.Name
+		if pre.Kind == wire.PreambleKindTar {
+			// Browser has nowhere to place extracted files; surface the tar
+			// bytes as a single blob so the user can save it locally.
+			filename = "conduit-received.tar"
+		}
+		return nopWriteCloser{pw}, nil
+	}
+	err = client.Recv(ctx, b.logger, server, code, client.RelayAuto, open)
 	if err != nil {
-		onDone.Invoke(err.Error(), js.Null())
+		onDone.Invoke(err.Error(), js.Null(), "")
 		return
 	}
 	ua := uint8ArrayFromBytes(buf.Bytes())
-	onDone.Invoke(js.Null(), ua)
+	onDone.Invoke(js.Null(), ua, filename)
 }
+
+// nopWriteCloser adapts a progressWriter to io.WriteCloser — no cleanup is
+// needed in the browser because we buffer all bytes in memory.
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
 
 func copyBytesFromJS(v js.Value) []byte {
 	if v.IsNull() || v.IsUndefined() {
