@@ -25,6 +25,24 @@
     barEl.style.width = (p * 100).toFixed(2) + "%";
   }
 
+  function isTextPayload(kind, mime) {
+    if (kind === "text") {
+      return true;
+    }
+    if (typeof mime === "string" && mime.toLowerCase().startsWith("text/")) {
+      return true;
+    }
+    return false;
+  }
+
+  function decodeUtf8(bytes) {
+    try {
+      return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    } catch (e) {
+      return "";
+    }
+  }
+
   function parseHashCode() {
     const h = window.location.hash.replace(/^#/, "").trim();
     if (!h) {
@@ -89,6 +107,26 @@
     const recvStatus = $("recvStatus");
     const recvDownload = $("recvDownload");
     const recvLink = $("recvLink");
+    const recvText = $("recvText");
+    const recvTextLabel = $("recvTextLabel");
+    const recvTextBody = $("recvTextBody");
+    const recvCopyBtn = $("recvCopyBtn");
+
+    recvCopyBtn.addEventListener("click", async () => {
+      const text = recvTextBody.textContent || "";
+      try {
+        await navigator.clipboard.writeText(text);
+        recvCopyBtn.textContent = "Copied";
+        setTimeout(() => {
+          recvCopyBtn.textContent = "Copy";
+        }, 1200);
+      } catch (e) {
+        recvCopyBtn.textContent = "Copy failed";
+        setTimeout(() => {
+          recvCopyBtn.textContent = "Copy";
+        }, 1200);
+      }
+    });
 
     const hashCode = parseHashCode();
     if (hashCode) {
@@ -208,6 +246,8 @@
       recvProgress.hidden = false;
       recvProgress.classList.add("indet");
       recvDownload.hidden = true;
+      recvText.hidden = true;
+      recvTextBody.textContent = "";
       setBar(recvBar, 0);
       setStatus(recvStatus, "Connecting…", null);
 
@@ -219,7 +259,7 @@
           setBar(recvBar, 1);
           setStatus(recvStatus, "Receiving… " + n + " bytes", null);
         },
-        function onDone(err, data, filename) {
+        function onDone(err, data, filename, kind, mime) {
           recvProgress.hidden = true;
           recvProgress.classList.remove("indet");
           if (err != null && err !== undefined) {
@@ -227,7 +267,16 @@
             return;
           }
           const bytes = new Uint8Array(data);
-          const blob = new Blob([bytes], { type: "application/octet-stream" });
+          if (isTextPayload(kind, mime)) {
+            const text = decodeUtf8(bytes);
+            recvTextBody.textContent = text;
+            recvTextLabel.textContent = filename ? "Received text · " + filename : "Received text";
+            recvText.hidden = false;
+            setStatus(recvStatus, "Received " + bytes.length + " bytes.", "ok");
+            return;
+          }
+          const type = mime || "application/octet-stream";
+          const blob = new Blob([bytes], { type });
           const url = URL.createObjectURL(blob);
           recvLink.href = url;
           recvLink.download = filename || "conduit-received.bin";

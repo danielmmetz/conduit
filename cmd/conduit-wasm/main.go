@@ -112,9 +112,12 @@ func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte,
 }
 
 // recvJS(server, code, onProgress, onDone)
-// onProgress(bytesReceived) is invoked as payload arrives; onDone(err, data,
-// filename) where data is a Uint8Array of the payload and filename is the
-// name advertised in the preamble (empty for text/stdin shapes).
+// onProgress(bytesReceived) is invoked as payload arrives;
+// onDone(err, data, filename, kind, mime) where data is a Uint8Array of the
+// payload, filename is the name advertised in the preamble (empty for text
+// shapes), kind is the preamble kind ("file"/"tar"/"text") and mime is the
+// advertised content type. The UI uses kind/mime to decide whether to render
+// payloads inline or as a download.
 func (b *wasmBridge) recvJS(parent context.Context, _ js.Value, args []js.Value) any {
 	if len(args) < recvJSArgN {
 		return js.Undefined()
@@ -136,11 +139,11 @@ func (b *wasmBridge) recvJS(parent context.Context, _ js.Value, args []js.Value)
 func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProgress, onDone js.Value) {
 	code, err := wire.ParseCode(codeStr)
 	if err != nil {
-		onDone.Invoke(err.Error(), js.Null(), "")
+		onDone.Invoke(err.Error(), js.Null(), "", "", "")
 		return
 	}
 	if len(code.Words) == 0 {
-		onDone.Invoke("code is missing the word portion", js.Null(), "")
+		onDone.Invoke("code is missing the word portion", js.Null(), "", "", "")
 		return
 	}
 	var buf bytes.Buffer
@@ -152,9 +155,11 @@ func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProg
 			}
 		},
 	}
-	var filename string
+	var filename, kind, mimeType string
 	open := func(pre wire.Preamble) (io.WriteCloser, error) {
 		filename = pre.Name
+		kind = pre.Kind
+		mimeType = pre.MIME
 		if pre.Kind == wire.PreambleKindTar {
 			// Browser has nowhere to place extracted files; surface the tar
 			// bytes as a single blob so the user can save it locally.
@@ -164,11 +169,11 @@ func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProg
 	}
 	err = client.Recv(ctx, b.logger, server, code, client.RelayAuto, open)
 	if err != nil {
-		onDone.Invoke(err.Error(), js.Null(), "")
+		onDone.Invoke(err.Error(), js.Null(), "", "", "")
 		return
 	}
 	ua := uint8ArrayFromBytes(buf.Bytes())
-	onDone.Invoke(js.Null(), ua, filename)
+	onDone.Invoke(js.Null(), ua, filename, kind, mimeType)
 }
 
 // nopWriteCloser adapts a progressWriter to io.WriteCloser — no cleanup is

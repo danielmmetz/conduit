@@ -48,10 +48,10 @@ func OpenSink(pre wire.Preamble, opts SinkOptions) (io.WriteCloser, error) {
 func openFileSink(pre wire.Preamble, opts SinkOptions) (io.WriteCloser, error) {
 	switch opts.OutPath {
 	case StdoutMarker:
-		return stdoutWriter(opts), nil
+		return stdoutWriter(pre, opts), nil
 	case "":
 		if pre.Kind == wire.PreambleKindText || pre.Name == "" || pre.Name == "stdin" {
-			return stdoutWriter(opts), nil
+			return stdoutWriter(pre, opts), nil
 		}
 		name := filepath.Base(pre.Name)
 		if name == "." || name == "/" || name == "" {
@@ -63,12 +63,46 @@ func openFileSink(pre wire.Preamble, opts SinkOptions) (io.WriteCloser, error) {
 	}
 }
 
-func stdoutWriter(opts SinkOptions) io.WriteCloser {
+func stdoutWriter(pre wire.Preamble, opts SinkOptions) io.WriteCloser {
 	w := opts.Stdout
 	if w == nil {
 		w = os.Stdout
 	}
+	// A text payload streamed to stdout typically lands in a terminal where a
+	// missing final newline leaves the next prompt glued to the payload. Pad
+	// on Close when the peer didn't already end with '\n'.
+	if pre.Kind == wire.PreambleKindText {
+		return &newlinePaddedWriter{w: w}
+	}
 	return nopWriteCloser{w: w}
+}
+
+// newlinePaddedWriter tracks the last byte written and, on Close, emits a '\n'
+// if no bytes were written or the stream did not end with one. Used for text
+// payloads routed to stdout so the shell prompt lands on a fresh line.
+type newlinePaddedWriter struct {
+	w    io.Writer
+	last byte
+	any  bool
+}
+
+func (p *newlinePaddedWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	if n > 0 {
+		p.any = true
+		p.last = b[n-1]
+	}
+	return n, err
+}
+
+func (p *newlinePaddedWriter) Close() error {
+	if p.any && p.last == '\n' {
+		return nil
+	}
+	if _, err := p.w.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("writing trailing newline: %w", err)
+	}
+	return nil
 }
 
 func createFile(path string) (io.WriteCloser, error) {

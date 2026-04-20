@@ -255,7 +255,7 @@ func TestOpenSinkFileDefaultsToPreambleName(t *testing.T) {
 	checkFile(t, filepath.Join(tmp, "hello.bin"), "hello")
 }
 
-func TestOpenSinkStdoutMarker(t *testing.T) {
+func TestOpenSinkTextStdoutPadsMissingNewline(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	pre := wire.Preamble{Kind: wire.PreambleKindText, Size: 5}
@@ -269,8 +269,46 @@ func TestOpenSinkStdoutMarker(t *testing.T) {
 	if err := sink.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
+	if out.String() != "hello\n" {
+		t.Fatalf("stdout = %q, want %q", out.String(), "hello\n")
+	}
+}
+
+func TestOpenSinkTextStdoutKeepsExistingNewline(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	pre := wire.Preamble{Kind: wire.PreambleKindText, Size: 6}
+	sink, err := xfer.OpenSink(pre, xfer.SinkOptions{OutPath: xfer.StdoutMarker, Stdout: &out})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := sink.Write([]byte("hello\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if out.String() != "hello\n" {
+		t.Fatalf("stdout = %q, want %q", out.String(), "hello\n")
+	}
+}
+
+func TestOpenSinkFileStdoutNoPadding(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	pre := wire.Preamble{Kind: wire.PreambleKindFile, Name: "blob.bin", Size: 5}
+	sink, err := xfer.OpenSink(pre, xfer.SinkOptions{OutPath: xfer.StdoutMarker, Stdout: &out})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := sink.Write([]byte("hello")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 	if out.String() != "hello" {
-		t.Fatalf("stdout = %q", out.String())
+		t.Fatalf("stdout = %q, want %q", out.String(), "hello")
 	}
 }
 
