@@ -33,6 +33,7 @@ type Server struct {
 	slotTTL            time.Duration
 	helloTimeout       time.Duration
 	maxSlot            uint32
+	maxConcurrent      int
 	reserveLimiter     *ratelimit.KeyedLimiter
 	joinLimiter        *ratelimit.KeyedLimiter
 	turnIssuer         *turnauth.Issuer
@@ -58,6 +59,13 @@ func WithHelloTimeout(d time.Duration) Option {
 // WithMaxSlot overrides the exclusive upper bound of slot IDs.
 func WithMaxSlot(n uint32) Option {
 	return func(s *Server) { s.maxSlot = n }
+}
+
+// WithMaxConcurrentSlots caps live reservations globally. Zero disables the
+// cap. When exceeded, new reserves are rejected with ErrCapacity rather than
+// tying up memory and filing descriptors.
+func WithMaxConcurrentSlots(n int) Option {
+	return func(s *Server) { s.maxConcurrent = n }
 }
 
 // WithReserveLimiter installs a per-IP rate limiter for reserve ops.
@@ -178,6 +186,10 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *websocket.Conn) {
 	sl, err := s.newSlot(conn)
 	if err != nil {
+		if errors.Is(err, errCapacity) {
+			writeError(ctx, conn, wire.ErrCapacity, "server at capacity")
+			return
+		}
 		writeError(ctx, conn, wire.ErrInternal, err.Error())
 		return
 	}
@@ -285,12 +297,18 @@ func (s *Server) handleJoin(ctx context.Context, logger *slog.Logger, conn *webs
 	}
 }
 
+// errCapacity signals that the global concurrent-slot cap is reached.
+var errCapacity = fmt.Errorf("server at capacity")
+
 // newSlot allocates a fresh slot and registers the sender connection.
 func (s *Server) newSlot(senderConn *websocket.Conn) (*slot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.slots == nil {
 		s.slots = make(map[uint32]*slot)
+	}
+	if s.maxConcurrent > 0 && len(s.slots) >= s.maxConcurrent {
+		return nil, errCapacity
 	}
 	for range newSlotAttempts {
 		id := rand.Uint32N(s.maxSlot-1) + 1

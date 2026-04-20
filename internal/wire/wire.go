@@ -34,6 +34,7 @@ const (
 	ErrRateLimited  = "rate_limited"
 	ErrSlotNotFound = "slot_not_found"
 	ErrExpired      = "expired"
+	ErrCapacity     = "capacity"
 	ErrInternal     = "internal"
 )
 

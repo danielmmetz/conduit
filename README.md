@@ -2,13 +2,22 @@
 
 Encrypted file and text transfer between two online peers: a short **join code**, **WebRTC** for data when possible, and optional **TURN** relay. The relay server only pairs sockets and forwards opaque bytes—it never sees plaintext.
 
-## Requirements
+## Install
 
-- [Go](https://go.dev/dl/) 1.26 or newer
+Pre-built binaries for Linux, macOS, and Windows are on the [GitHub Releases](https://github.com/danielmmetz/conduit/releases) page. Each archive ships `conduit`, `conduit-server`, and `conduit-turn`:
 
-## Build
+```bash
+# Replace VERSION / OS / ARCH as needed (e.g. v0.1.0 / linux / amd64).
+curl -LO https://github.com/danielmmetz/conduit/releases/download/VERSION/conduit_VERSION_OS_ARCH.tar.gz
+tar -xzf conduit_VERSION_OS_ARCH.tar.gz
+sudo install -m 0755 conduit conduit-server conduit-turn /usr/local/bin/
+```
 
-From the repo root:
+Verify against `checksums.txt` from the same release.
+
+## Build from source
+
+Requires [Go](https://go.dev/dl/) 1.26 or newer. From the repo root:
 
 ```bash
 go build -o conduit ./cmd/conduit
@@ -88,6 +97,34 @@ Relay behavior:
 ## Web client
 
 The server embeds the SPA under `cmd/conduit-server/web/`. After `go generate ./cmd/conduit-server`, `go build ./cmd/conduit-server` picks up `main.wasm` and `wasm_exec.js`. The UI can **send** a file or **receive** using the same code format as the CLI; visiting `/#<code>` pre-fills receive and starts a transfer.
+
+## Deploy behind Caddy
+
+`deploy/` contains example configs for a single-VPS deployment:
+
+- [`deploy/Caddyfile`](deploy/Caddyfile) — TLS termination and reverse proxy for `/ws` and the embedded SPA. Caddy does **not** front TURN (UDP is not proxied); `conduit-server -turn-embed` binds 3478 directly, so open 3478/udp+tcp on the firewall.
+- [`deploy/conduit-server.service`](deploy/conduit-server.service) — systemd unit running as a dedicated `conduit` user with `CAP_NET_BIND_SERVICE` (to bind 3478 unprivileged) and the usual sandboxing. Reads `/etc/conduit/server.env` for `CONDUIT_TURN_PUBLIC_IP` and `CONDUIT_TURN_SECRET`.
+
+Sketch:
+
+```bash
+sudo useradd --system --home /var/lib/conduit --shell /usr/sbin/nologin conduit
+sudo install -d -o conduit -g conduit /etc/conduit
+sudo tee /etc/conduit/server.env >/dev/null <<EOF
+CONDUIT_TURN_PUBLIC_IP=203.0.113.10
+CONDUIT_TURN_SECRET=$(openssl rand -hex 32)
+EOF
+sudo chmod 0640 /etc/conduit/server.env
+sudo chown root:conduit /etc/conduit/server.env
+
+sudo install -m 0644 deploy/conduit-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now conduit-server
+```
+
+Point Caddy at `deploy/Caddyfile` (edit the hostname) and it handles TLS + the HTTP side.
+
+Rate limits and the global concurrent-slot cap are tunable via `-reserve-per-min`, `-join-per-min`, and `-max-slots` (default `2000`). Raise `-max-slots` if you expect bursts of many idle reservations; lower it to cap memory on small hosts.
 
 ## What works today
 

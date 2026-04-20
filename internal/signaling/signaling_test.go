@@ -302,6 +302,25 @@ func TestReserveRateLimited(t *testing.T) {
 	}
 }
 
+func TestReserveCapacityReached(t *testing.T) {
+	h := newTestHarness(t, signaling.WithMaxConcurrentSlots(1))
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	first := h.dial(ctx, t)
+	writeJSON(t, ctx, first, wire.ClientHello{Op: wire.OpReserve})
+	if env := readEnvelope(t, ctx, first); env.Op != wire.OpReserved {
+		t.Fatalf("first reserve env = %+v, want reserved", env)
+	}
+
+	second := h.dial(ctx, t)
+	writeJSON(t, ctx, second, wire.ClientHello{Op: wire.OpReserve})
+	env := readEnvelope(t, ctx, second)
+	if env.Op != wire.OpError || env.Code != wire.ErrCapacity {
+		t.Fatalf("second reserve env = %+v, want capacity error", env)
+	}
+}
+
 // TestConcurrentReserves makes sure pairing is race-free under load.
 func TestConcurrentReserves(t *testing.T) {
 	h := newTestHarness(t)

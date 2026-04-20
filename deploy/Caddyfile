@@ -1,0 +1,27 @@
+# Caddy handles TLS (ACME) and reverse-proxies the signaling WebSocket and the
+# embedded SPA to conduit-server. TURN is *not* proxied here: conduit-server
+# binds 3478/udp+tcp itself (see -turn-embed) because Caddy does not front UDP
+# and is not in the TURN media path. Open UDP/TCP 3478 on the firewall.
+#
+# Replace conduit.example.com with your hostname.
+
+conduit.example.com {
+	encode zstd gzip
+
+	@ws path /ws
+	handle @ws {
+		reverse_proxy http://127.0.0.1:8080
+	}
+
+	handle /healthz {
+		reverse_proxy http://127.0.0.1:8080
+	}
+
+	handle {
+		reverse_proxy http://127.0.0.1:8080
+	}
+
+	log {
+		output file /var/log/caddy/conduit.log
+	}
+}

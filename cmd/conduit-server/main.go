@@ -43,6 +43,7 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 	fs := flag.NewFlagSet("conduit-server", flag.ContinueOnError)
 	var (
 		addr          string
+		maxSlots      int
 		reservePerMin float64
 		reserveBurst  int
 		joinPerMin    float64
@@ -56,6 +57,7 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 		turnListenTCP string
 	)
 	fs.StringVar(&addr, "addr", ":8080", "listen address")
+	fs.IntVar(&maxSlots, "max-slots", 2000, "global cap on concurrent reservations (0 disables)")
 	fs.Float64Var(&reservePerMin, "reserve-per-min", 30, "reserve attempts per minute per IP (0 disables)")
 	fs.IntVar(&reserveBurst, "reserve-burst", 10, "reserve burst size")
 	fs.Float64Var(&joinPerMin, "join-per-min", 60, "join attempts per minute per IP (0 disables)")
@@ -136,6 +138,7 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 
 	opts := []signaling.Option{
 		signaling.WithTrustXForwardedFor(trustXFF),
+		signaling.WithMaxConcurrentSlots(maxSlots),
 	}
 	if reservePerMin > 0 {
 		opts = append(opts, signaling.WithReserveLimiter(&ratelimit.KeyedLimiter{
