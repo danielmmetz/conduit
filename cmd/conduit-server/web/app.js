@@ -43,6 +43,26 @@
     }
   }
 
+  function recvCliCommand(server, code) {
+    return "conduit recv --server " + server + " " + code;
+  }
+
+  async function copyWithFlash(btn, text, restoreLabel) {
+    const restore = restoreLabel != null ? restoreLabel : btn.textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = "Copied";
+      setTimeout(() => {
+        btn.textContent = restore;
+      }, 1200);
+    } catch (e) {
+      btn.textContent = "Copy failed";
+      setTimeout(() => {
+        btn.textContent = restore;
+      }, 1200);
+    }
+  }
+
   function parseHashCode() {
     const h = window.location.hash.replace(/^#/, "").trim();
     if (!h) {
@@ -95,6 +115,10 @@
     const sendFileName = $("sendFileName");
     const sendCode = $("sendCode");
     const codeText = $("codeText");
+    const shareBrowserUrl = $("shareBrowserUrl");
+    const shareCliCmd = $("shareCliCmd");
+    const copyBrowserUrlBtn = $("copyBrowserUrlBtn");
+    const copyCliCmdBtn = $("copyCliCmdBtn");
     const qrHost = $("qrHost");
     const sendProgress = $("sendProgress");
     const sendBar = $("sendBar");
@@ -114,18 +138,15 @@
 
     recvCopyBtn.addEventListener("click", async () => {
       const text = recvTextBody.textContent || "";
-      try {
-        await navigator.clipboard.writeText(text);
-        recvCopyBtn.textContent = "Copied";
-        setTimeout(() => {
-          recvCopyBtn.textContent = "Copy";
-        }, 1200);
-      } catch (e) {
-        recvCopyBtn.textContent = "Copy failed";
-        setTimeout(() => {
-          recvCopyBtn.textContent = "Copy";
-        }, 1200);
-      }
+      await copyWithFlash(recvCopyBtn, text, "Copy");
+    });
+
+    copyBrowserUrlBtn.addEventListener("click", () => {
+      copyWithFlash(copyBrowserUrlBtn, shareBrowserUrl.textContent || "", "Copy");
+    });
+
+    copyCliCmdBtn.addEventListener("click", () => {
+      copyWithFlash(copyCliCmdBtn, shareCliCmd.textContent || "", "Copy");
     });
 
     const hashCode = parseHashCode();
@@ -206,6 +227,8 @@
           codeText.textContent = code;
           sendCode.hidden = false;
           const link = `${window.location.origin}${window.location.pathname}#${code}`;
+          shareBrowserUrl.textContent = link;
+          shareCliCmd.textContent = recvCliCommand(server, code);
           renderQR(qrHost, link);
         },
         function onProgress(done, total) {

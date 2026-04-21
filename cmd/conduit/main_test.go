@@ -484,6 +484,18 @@ func truncateForLog(b []byte, n int) string {
 	return string(b[:n]) + "…"
 }
 
+func TestReceivePageURL(t *testing.T) {
+	t.Parallel()
+	u, err := receivePageURL("http://localhost:8080", "7-foo-bar-baz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "http://localhost:8080#7-foo-bar-baz"
+	if u != want {
+		t.Fatalf("receivePageURL: got %q, want %q", u, want)
+	}
+}
+
 // extractCode pulls the numeric slot out of the "code: N" line.
 func extractCode(out string) (string, bool) {
 	const prefix = "code: "

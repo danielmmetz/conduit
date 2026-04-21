@@ -36,6 +36,20 @@
         <div id="sendCode" class="code-box" hidden>
           <p class="label">Share this code with the receiver</p>
           <code id="codeText"></code>
+          <div class="share-block-wrap">
+            <p class="label">Receive in the browser</p>
+            <div class="copy-row">
+              <code id="shareBrowserUrl" class="share-code"></code>
+              <button type="button" class="copy-inline" id="copyBrowserUrlBtn">Copy</button>
+            </div>
+          </div>
+          <div class="share-block-wrap">
+            <p class="label">Receive on the CLI</p>
+            <div class="copy-row">
+              <code id="shareCliCmd" class="share-code"></code>
+              <button type="button" class="copy-inline" id="copyCliCmdBtn">Copy</button>
+            </div>
+          </div>
           <div id="qrHost"></div>
         </div>
         <div class="progress" id="sendProgress" hidden>

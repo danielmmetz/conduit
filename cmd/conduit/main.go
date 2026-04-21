@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -83,6 +84,10 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out io.Writer) *ffcli.Command
 			}
 			if err := client.Send(ctx, logger, server, policy, src.Preamble, src.Reader, func(code string) {
 				fmt.Fprintf(out, "code: %s\n", code)
+				if page, err := receivePageURL(server, code); err == nil {
+					fmt.Fprintf(out, "receive in the browser: %s\n", page)
+				}
+				fmt.Fprintf(out, "receive on the CLI: conduit recv --server %s %s\n", server, code)
 				fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
 			}, onProgress); err != nil {
 				return fmt.Errorf("running send: %w", err)
@@ -161,4 +166,14 @@ func openSource(text string, args []string, stdin io.Reader) (*xfer.Source, erro
 		return nil, fmt.Errorf("resolving send source: %w", err)
 	}
 	return src, nil
+}
+
+// receivePageURL is the web UI URL that pre-fills the code in the fragment (same host as --server).
+func receivePageURL(server, code string) (string, error) {
+	u, err := url.Parse(server)
+	if err != nil {
+		return "", fmt.Errorf("parsing server %q: %w", server, err)
+	}
+	u.Fragment = code
+	return u.String(), nil
 }
