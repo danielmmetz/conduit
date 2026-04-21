@@ -7,8 +7,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"syscall/js"
 
@@ -48,8 +50,38 @@ func (b *wasmBridge) register(ctx context.Context) {
 	js.Global().Set("conduit", exports)
 }
 
+// startOp runs f in a tracked goroutine. A panic inside f (including one
+// raised by js.Value.Invoke when the JS callback throws) would otherwise
+// terminate the whole wasm runtime — subsequent JS → Go calls would fail
+// with "Go program has already exited". Recover, surface the crash to the
+// browser console, and keep the runtime alive.
 func (b *wasmBridge) startOp(f func()) {
-	b.ops.Go(f)
+	b.ops.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				msg := fmt.Sprintf("conduit-wasm: panic: %v\n%s", r, debug.Stack())
+				js.Global().Get("console").Call("error", msg)
+			}
+		}()
+		f()
+	})
+}
+
+// safeInvoke calls fn with args and swallows any JS exception it throws. The
+// underlying [js.Value.Invoke] turns JS exceptions into Go panics; without
+// this wrapper a buggy UI callback would kill the wasm runtime and break
+// every subsequent send/recv. Exceptions are surfaced to the browser console
+// so they're still debuggable.
+func safeInvoke(fn js.Value, args ...any) {
+	if fn.Type() != js.TypeFunction {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			js.Global().Get("console").Call("error", fmt.Sprintf("conduit-wasm: callback threw: %v", r))
+		}
+	}()
+	fn.Invoke(args...)
 }
 
 const (
@@ -88,9 +120,7 @@ func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte,
 		r:     bytes.NewReader(payload),
 		total: int64(len(payload)),
 		onProgress: func(done, total int64) {
-			if onProgress.Type() == js.TypeFunction && onProgress.Truthy() {
-				onProgress.Invoke(done, total)
-			}
+			safeInvoke(onProgress, done, total)
 		},
 	}
 	preamble := wire.Preamble{
@@ -100,15 +130,13 @@ func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte,
 		MIME: "application/octet-stream",
 	}
 	err := client.Send(ctx, b.logger, server, client.RelayAuto, preamble, pr, func(code string) {
-		if onCode.Type() == js.TypeFunction && onCode.Truthy() {
-			onCode.Invoke(code)
-		}
+		safeInvoke(onCode, code)
 	}, nil)
 	if err != nil {
-		onDone.Invoke(err.Error())
+		safeInvoke(onDone, err.Error())
 		return
 	}
-	onDone.Invoke(js.Null())
+	safeInvoke(onDone, js.Null())
 }
 
 // recvJS(server, code, onProgress, onDone)
@@ -139,20 +167,18 @@ func (b *wasmBridge) recvJS(parent context.Context, _ js.Value, args []js.Value)
 func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProgress, onDone js.Value) {
 	code, err := wire.ParseCode(codeStr)
 	if err != nil {
-		onDone.Invoke(err.Error(), js.Null(), "", "", "")
+		safeInvoke(onDone, err.Error(), js.Null(), "", "", "")
 		return
 	}
 	if len(code.Words) == 0 {
-		onDone.Invoke("code is missing the word portion", js.Null(), "", "", "")
+		safeInvoke(onDone, "code is missing the word portion", js.Null(), "", "", "")
 		return
 	}
 	var buf bytes.Buffer
 	pw := &progressWriter{
 		dst: &buf,
 		cb: func(total int64) {
-			if onProgress.Type() == js.TypeFunction && onProgress.Truthy() {
-				onProgress.Invoke(total)
-			}
+			safeInvoke(onProgress, total)
 		},
 	}
 	var filename, kind, mimeType string
@@ -169,11 +195,11 @@ func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProg
 	}
 	err = client.Recv(ctx, b.logger, server, code, client.RelayAuto, open)
 	if err != nil {
-		onDone.Invoke(err.Error(), js.Null(), "", "", "")
+		safeInvoke(onDone, err.Error(), js.Null(), "", "", "")
 		return
 	}
 	ua := uint8ArrayFromBytes(buf.Bytes())
-	onDone.Invoke(js.Null(), ua, filename, kind, mimeType)
+	safeInvoke(onDone, js.Null(), ua, filename, kind, mimeType)
 }
 
 // nopWriteCloser adapts a progressWriter to io.WriteCloser — no cleanup is
