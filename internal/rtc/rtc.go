@@ -292,7 +292,12 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 		}
 		return fmt.Errorf("receiving: %w", werr)
 	}
-	defer raw.Close()
+	// pion's wasm detachedDataChannel.Close closes an internal channel and
+	// panics on a second call; the native variant is idempotent. Funnel both
+	// the happy-path close and the error-path defer through sync.OnceValue so
+	// we stay portable across build tags.
+	closeRaw := sync.OnceValue(raw.Close)
+	defer func() { _ = closeRaw() }()
 
 	tr := newTagReader(raw)
 	pr, err := wire.Decrypt(tr, key)
@@ -310,7 +315,7 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 	// reader drains all pending ack frames via SCTP EOF. Closing after
 	// teardown races with the sender's deferred local close and can drop the
 	// final ack.
-	if err := raw.Close(); err != nil {
+	if err := closeRaw(); err != nil {
 		cfg.Logger.DebugContext(ctx, "closing data channel", slog.String("err", err.Error()))
 	}
 	if err := exchangeTeardown(ctx, sig, key); err != nil {
