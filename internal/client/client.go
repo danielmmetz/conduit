@@ -114,7 +114,7 @@ func Send(ctx context.Context, logger *slog.Logger, server string, policy RelayP
 	}
 	logger.DebugContext(ctx, "pake key derived")
 
-	ice := iceServersForSend(paired, reserved)
+	ice := iceServersFromEnvelope(paired)
 	if policy == RelayNone {
 		ice = nil
 	}
@@ -285,13 +285,6 @@ func iceServersFromEnvelope(env wire.Envelope) []webrtc.ICEServer {
 		Username:   env.TURN.Username,
 		Credential: env.TURN.Credential,
 	}}
-}
-
-func iceServersForSend(paired, reserved wire.Envelope) []webrtc.ICEServer {
-	if s := iceServersFromEnvelope(paired); len(s) > 0 {
-		return s
-	}
-	return iceServersFromEnvelope(reserved)
 }
 
 // wsMsgConn adapts a coder/websocket connection to wire.MsgConn so the PAKE

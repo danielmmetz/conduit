@@ -181,21 +181,25 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 		}
 		return fmt.Errorf("sending: %w", werr)
 	}
+	// pion/wasm's detached data channel panics on a second Close (the native
+	// variant is idempotent). Both this defer and readAcks's ctx watcher will
+	// try to close raw, so funnel them through OnceValue.
+	closeRaw := sync.OnceValue(raw.Close)
 
 	// Ack reader runs concurrently with the payload writer: the receiver
 	// sends tagAck frames back on the same data channel, and we surface
 	// them through cfg.OnRemoteProgress. readAcks is ctx-aware (it spawns
-	// its own watcher that closes raw on ctx.Done), so the goroutine is
+	// its own watcher that calls closeRaw on ctx.Done), so the goroutine is
 	// guaranteed to exit on either a clean peer close or ctx cancellation —
 	// which lets the caller synchronously ackEG.Wait() below.
 	var ackEG errgroup.Group
 	defer func() {
-		_ = raw.Close()
+		_ = closeRaw()
 		_ = ackEG.Wait()
 	}()
 	if cfg.OnRemoteProgress != nil {
 		ackEG.Go(func() error {
-			err := readAcks(ctx, raw, cfg.OnRemoteProgress)
+			err := readAcks(ctx, raw, func() { _ = closeRaw() }, cfg.OnRemoteProgress)
 			if err != nil && !isAnyOf(err, io.EOF, io.ErrClosedPipe, context.Canceled, context.DeadlineExceeded) {
 				cfg.Logger.DebugContext(ctx, "ack reader exit", slog.String("err", err.Error()))
 			}

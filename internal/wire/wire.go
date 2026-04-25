@@ -18,8 +18,6 @@
 // does not parse them.
 package wire
 
-const ProtocolVersion = "conduit/v1"
-
 const (
 	OpReserve  = "reserve"
 	OpJoin     = "join"

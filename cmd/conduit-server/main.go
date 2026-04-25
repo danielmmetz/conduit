@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	iofs "io/fs"
@@ -50,7 +51,7 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 		joinBurst     int
 		trustXFF      bool
 		turnSecret    string
-		turnURIs      stringList
+		turnURIs      []string
 		turnEmbed     bool
 		turnPublicIP  string
 		turnListenUDP string
@@ -64,7 +65,14 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 	fs.IntVar(&joinBurst, "join-burst", 20, "join burst size")
 	fs.BoolVar(&trustXFF, "trust-xff", false, "derive source IP from X-Forwarded-For (only when fronted by a trusted proxy)")
 	fs.StringVar(&turnSecret, "turn-secret", "", "HMAC secret for TURN credentials (empty disables issuance; with --turn-embed, omitted means generate a random secret for this process only)")
-	fs.Var(&turnURIs, "turn-uri", "TURN URI to advertise (repeat or comma-separate; e.g. turn:turn.example:3478)")
+	fs.Func("turn-uri", "TURN URI to advertise (repeat or comma-separate; e.g. turn:turn.example:3478)", func(v string) error {
+		for p := range strings.SplitSeq(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				turnURIs = append(turnURIs, p)
+			}
+		}
+		return nil
+	})
 	fs.BoolVar(&turnEmbed, "turn-embed", false, "run an in-process TURN server (requires --turn-public-ip; --turn-secret optional, see --turn-secret help)")
 	fs.StringVar(&turnPublicIP, "turn-public-ip", "", "public relay IP advertised to TURN clients when --turn-embed is set")
 	fs.StringVar(&turnListenUDP, "turn-listen-udp", ":3478", "UDP listen address for embedded TURN")
@@ -73,7 +81,7 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("parsing flags: %w", err)
 	}
 
-	issuerURIs := []string(turnURIs)
+	issuerURIs := turnURIs
 	var relayIP net.IP
 	turnSecretAuto := false
 	if turnEmbed {
@@ -231,17 +239,5 @@ func randomTurnSecret() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("reading random bytes: %w", err)
 	}
-	return string(b), nil
-}
-
-type stringList []string
-
-func (s *stringList) String() string { return strings.Join(*s, ",") }
-func (s *stringList) Set(v string) error {
-	for p := range strings.SplitSeq(v, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			*s = append(*s, p)
-		}
-	}
-	return nil
+	return hex.EncodeToString(b), nil
 }

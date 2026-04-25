@@ -36,22 +36,19 @@ const maxFrameSize = 128 * 1024
 type tagWriter struct {
 	w      io.Writer
 	closed bool
-	scratch []byte
 }
 
 func newTagWriter(w io.Writer) *tagWriter {
-	return &tagWriter{w: w, scratch: make([]byte, 0, maxFrameSize)}
+	return &tagWriter{w: w}
 }
 
 func (t *tagWriter) Write(p []byte) (int, error) {
 	if t.closed {
 		return 0, fmt.Errorf("write after close")
 	}
-	// Reuse scratch across calls; age writes in fixed-size chunks, so the
-	// buffer settles at one allocation after the first frame.
-	buf := append(t.scratch[:0], tagData)
-	buf = append(buf, p...)
-	t.scratch = buf
+	buf := make([]byte, 1+len(p))
+	buf[0] = tagData
+	copy(buf[1:], p)
 	if _, err := t.w.Write(buf); err != nil {
 		return 0, fmt.Errorf("writing data frame: %w", err)
 	}
@@ -105,6 +102,9 @@ func (t *tagReader) Read(p []byte) (int, error) {
 		t.eof = true
 		return 0, io.EOF
 	case tagData:
+		if n == 1 {
+			return 0, fmt.Errorf("empty data frame")
+		}
 		t.buf = append(t.buf[:0], t.msg[1:n]...)
 		m := copy(p, t.buf)
 		t.buf = t.buf[m:]
@@ -133,22 +133,24 @@ func writeAck(w io.Writer, total int64) error {
 // readAcks loops reading tagged messages from r; for each tagAck frame it
 // invokes cb with the cumulative total. Returns when r.Read returns any
 // error (io.EOF / io.ErrClosedPipe on clean shutdown, or a real failure) or
-// when ctx is cancelled — in which case a watcher goroutine closes r to
-// unblock the in-flight Read, and the returned error wraps ctx.Err().
+// when ctx is cancelled — in which case a watcher goroutine invokes unblock
+// to break r.Read out of its blocking syscall, and the returned error wraps
+// ctx.Err(). unblock must be safe to call multiple times: the watcher always
+// fires once readAcks returns, so callers that also close r in their own
+// defer should pass an idempotent (e.g. sync.OnceFunc) closer.
 //
 // Unknown tags are tolerated silently for forward compat; the sender only
 // ever expects tagAck over the receiver→sender direction, but a future peer
 // could layer new control frames without breaking older senders.
-func readAcks(ctx context.Context, r io.ReadCloser, cb func(int64)) error {
+func readAcks(ctx context.Context, r io.Reader, unblock func(), cb func(int64)) error {
 	ctx, cancel := context.WithCancel(ctx)
 	// Watcher forces r.Read to unblock when ctx fires. The derived ctx is
 	// also cancelled when readAcks returns naturally (via the defer below),
-	// so the watcher always terminates; closing r at that point is redundant
-	// but harmless because the outer caller's defer closes it anyway.
+	// so the watcher always terminates.
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		<-ctx.Done()
-		_ = r.Close()
+		unblock()
 	})
 	// cancel before wg.Wait so the watcher unblocks and can be joined.
 	defer func() {

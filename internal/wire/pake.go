@@ -31,20 +31,10 @@ func RecvHandshakeMsg(ctx context.Context, mc MsgConn, code Code) ([]byte, error
 
 func handshakeMsg(ctx context.Context, mc MsgConn, code Code, sender bool) ([]byte, error) {
 	return handshakeCore(code, sender, func(mine []byte) ([]byte, error) {
-		var (
-			eg   errgroup.Group
-			peer []byte
-			err  error
+		return exchangeConcurrent(
+			func() error { return mc.Send(ctx, mine) },
+			func() ([]byte, error) { return mc.Recv(ctx) },
 		)
-		eg.Go(func() error { return mc.Send(ctx, mine) })
-		peer, err = mc.Recv(ctx)
-		if err := eg.Wait(); err != nil {
-			return nil, fmt.Errorf("writing pake msg: %w", err)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading pake msg: %w", err)
-		}
-		return peer, nil
 	})
 }
 
@@ -71,25 +61,32 @@ func RecvHandshake(rw io.ReadWriter, code Code) ([]byte, error) {
 
 func handshake(rw io.ReadWriter, code Code, sender bool) ([]byte, error) {
 	return handshakeCore(code, sender, func(mine []byte) ([]byte, error) {
-		// Write and read concurrently: on a synchronous transport (io.Pipe
-		// in tests, or any unbuffered conn) a write-then-read from both
-		// sides deadlocks. errgroup.Wait explicitly joins the write
-		// goroutine before we return on every path.
-		var (
-			eg   errgroup.Group
-			peer []byte
-			err  error
+		return exchangeConcurrent(
+			func() error { return writeFrame(rw, mine) },
+			func() ([]byte, error) { return readFrame(rw) },
 		)
-		eg.Go(func() error { return writeFrame(rw, mine) })
-		peer, err = readFrame(rw)
-		if err := eg.Wait(); err != nil {
-			return nil, fmt.Errorf("writing pake msg: %w", err)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading pake msg: %w", err)
-		}
-		return peer, nil
 	})
+}
+
+// exchangeConcurrent sends and receives in parallel: on a synchronous
+// transport (io.Pipe in tests, or any unbuffered conn) a write-then-read from
+// both sides deadlocks. The send goroutine is always joined before return on
+// every path.
+func exchangeConcurrent(send func() error, recv func() ([]byte, error)) ([]byte, error) {
+	var (
+		eg   errgroup.Group
+		peer []byte
+		err  error
+	)
+	eg.Go(send)
+	peer, err = recv()
+	if werr := eg.Wait(); werr != nil {
+		return nil, fmt.Errorf("writing pake msg: %w", werr)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading pake msg: %w", err)
+	}
+	return peer, nil
 }
 
 func handshakeCore(code Code, sender bool, exchange func(mine []byte) ([]byte, error)) ([]byte, error) {

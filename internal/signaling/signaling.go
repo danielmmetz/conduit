@@ -32,6 +32,7 @@ type Server struct {
 	logger             *slog.Logger
 	slotTTL            time.Duration
 	helloTimeout       time.Duration
+	heartbeatInterval  time.Duration
 	maxSlot            uint32
 	maxConcurrent      int
 	reserveLimiter     *ratelimit.KeyedLimiter
@@ -54,6 +55,14 @@ func WithSlotTTL(d time.Duration) Option {
 // WithHelloTimeout overrides the default first-frame timeout.
 func WithHelloTimeout(d time.Duration) Option {
 	return func(s *Server) { s.helloTimeout = d }
+}
+
+// WithRelayHeartbeat sets the interval between WebSocket pings sent on each
+// peer's connection during the relay phase. Zero disables. A peer that fails
+// to acknowledge a ping within one interval has its relay torn down, which
+// reclaims the slot when a peer's network silently drops.
+func WithRelayHeartbeat(d time.Duration) Option {
+	return func(s *Server) { s.heartbeatInterval = d }
 }
 
 // WithMaxSlot overrides the exclusive upper bound of slot IDs.
@@ -95,10 +104,11 @@ func WithTrustXForwardedFor(trust bool) Option {
 // get their defaults and can be overridden via Options.
 func NewServer(logger *slog.Logger, opts ...Option) *Server {
 	s := &Server{
-		logger:       logger,
-		slotTTL:      10 * time.Minute,
-		helloTimeout: 10 * time.Second,
-		maxSlot:      100_000,
+		logger:            logger,
+		slotTTL:           10 * time.Minute,
+		helloTimeout:      10 * time.Second,
+		heartbeatInterval: 30 * time.Second,
+		maxSlot:           100_000,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -167,6 +177,12 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	switch hello.Op {
 	case wire.OpReserve:
+		// Capacity is checked first so rejected reserves don't drain the
+		// per-IP rate-limiter bucket of legitimate users sharing a NAT.
+		if s.maxConcurrent > 0 && s.ActiveSlots() >= s.maxConcurrent {
+			writeError(r.Context(), conn, wire.ErrCapacity, "server at capacity")
+			return
+		}
 		if s.reserveLimiter != nil && !s.reserveLimiter.Allow(ip) {
 			writeError(r.Context(), conn, wire.ErrRateLimited, "reserve rate limit")
 			return
@@ -256,6 +272,7 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 		case <-relayCtx.Done():
 		}
 	})
+	wg.Go(func() { s.runHeartbeat(relayCtx, conn, cancelRelay) })
 
 	if err := relay(relayCtx, conn, sl.receiverConn); err != nil && !isCleanClose(err) && relayCtx.Err() == nil {
 		logger.InfoContext(ctx, "sender→receiver relay ended", slog.Any("err", err))
@@ -291,6 +308,7 @@ func (s *Server) handleJoin(ctx context.Context, logger *slog.Logger, conn *webs
 		case <-relayCtx.Done():
 		}
 	})
+	wg.Go(func() { s.runHeartbeat(relayCtx, conn, cancelRelay) })
 
 	if err := relay(relayCtx, conn, sl.senderConn); err != nil && !isCleanClose(err) && relayCtx.Err() == nil {
 		logger.InfoContext(ctx, "receiver→sender relay ended", slog.Any("err", err))
@@ -386,6 +404,34 @@ func (s *Server) sourceIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// runHeartbeat pings conn every heartbeatInterval until ctx is done. A failed
+// ping (peer gone or network silently dropped) cancels the relay so the slot
+// is reclaimed instead of pinning a goroutine until TCP keepalive notices —
+// which can be hours on a default Linux. coder/websocket serializes Ping with
+// data writes via writeFrameMu, so this is safe to run alongside relay's
+// cross-handler writes to conn.
+func (s *Server) runHeartbeat(ctx context.Context, conn *websocket.Conn, cancel context.CancelFunc) {
+	if s.heartbeatInterval <= 0 {
+		return
+	}
+	t := time.NewTicker(s.heartbeatInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			pingCtx, pcancel := context.WithTimeout(ctx, s.heartbeatInterval)
+			err := conn.Ping(pingCtx)
+			pcancel()
+			if err != nil {
+				cancel()
+				return
+			}
+		}
+	}
 }
 
 // relay forwards frames from src to dst verbatim until the context is canceled
