@@ -47,6 +47,9 @@ func (b *wasmBridge) register(ctx context.Context) {
 	exports.Set("recv", js.FuncOf(func(this js.Value, args []js.Value) any {
 		return b.recvJS(ctx, this, args)
 	}))
+	exports.Set("sendText", js.FuncOf(func(this js.Value, args []js.Value) any {
+		return b.sendTextJS(ctx, this, args)
+	}))
 	js.Global().Set("conduit", exports)
 }
 
@@ -85,8 +88,9 @@ func safeInvoke(fn js.Value, args ...any) {
 }
 
 const (
-	sendJSArgN = 6 // server, payload, filename, onCode, onProgress, onDone
-	recvJSArgN = 4 // server, code, onProgress, onDone
+	sendJSArgN     = 6 // server, payload, filename, onCode, onProgress, onDone
+	sendTextJSArgN = 5 // server, text, onCode, onProgress, onDone
+	recvJSArgN     = 4 // server, code, onProgress, onDone
 )
 
 // sendJS(server, payload, filename, onCode, onProgress, onDone)
@@ -128,6 +132,52 @@ func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte,
 		Name: filename,
 		Size: int64(len(payload)),
 		MIME: "application/octet-stream",
+	}
+	err := client.Send(ctx, b.logger, server, client.RelayAuto, preamble, pr, func(code string) {
+		safeInvoke(onCode, code)
+	}, nil)
+	if err != nil {
+		safeInvoke(onDone, err.Error())
+		return
+	}
+	safeInvoke(onDone, js.Null())
+}
+
+// sendTextJS(server, text, onCode, onProgress, onDone)
+// Sends a UTF-8 text payload (wire.PreambleKindText) for receivers that
+// display or save text shapes differently from binary files.
+func (b *wasmBridge) sendTextJS(parent context.Context, _ js.Value, args []js.Value) any {
+	if len(args) < sendTextJSArgN {
+		return js.Undefined()
+	}
+	server := args[0].String()
+	text := args[1].String()
+	onCode := args[2]
+	onProgress := args[3]
+	onDone := args[4]
+	if onDone.Type() != js.TypeFunction {
+		return js.Undefined()
+	}
+
+	b.startOp(func() {
+		b.runSendText(parent, server, text, onCode, onProgress, onDone)
+	})
+	return js.Undefined()
+}
+
+func (b *wasmBridge) runSendText(ctx context.Context, server, text string, onCode, onProgress, onDone js.Value) {
+	payload := []byte(text)
+	pr := &progressReader{
+		r:     bytes.NewReader(payload),
+		total: int64(len(payload)),
+		onProgress: func(done, total int64) {
+			safeInvoke(onProgress, done, total)
+		},
+	}
+	preamble := wire.Preamble{
+		Kind: wire.PreambleKindText,
+		Size: int64(len(payload)),
+		MIME: "text/plain; charset=utf-8",
 	}
 	err := client.Send(ctx, b.logger, server, client.RelayAuto, preamble, pr, func(code string) {
 		safeInvoke(onCode, code)

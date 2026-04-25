@@ -43,6 +43,106 @@
     }
   }
 
+  function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || "conduit-received.bin";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 5000);
+  }
+
+  function fileBasename(name) {
+    if (!name || typeof name !== "string") {
+      return "";
+    }
+    const parts = name.replace(/\\/g, "/").split("/");
+    const base = parts.pop();
+    return base || "";
+  }
+
+  /** Same idea as webwormhole: Safari cannot rely on SW-driven downloads. */
+  function prefersServiceWorkerDownload() {
+    if (!("serviceWorker" in navigator)) {
+      return false;
+    }
+    if (!window.isSecureContext) {
+      return false;
+    }
+    if (
+      /Safari/.test(navigator.userAgent) &&
+      !/Chrome|Chromium/.test(navigator.userAgent)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  async function ensureServiceWorkerForDownload() {
+    if (!prefersServiceWorkerDownload()) {
+      return false;
+    }
+    try {
+      await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      await navigator.serviceWorker.ready;
+      return !!navigator.serviceWorker.controller;
+    } catch (e) {
+      console.warn("conduit service worker:", e);
+      return false;
+    }
+  }
+
+  /**
+   * Stream bytes to the service worker, then open a hidden iframe on /_/id so
+   * the worker responds with Content-Disposition: attachment (Web Wormhole pattern).
+   */
+  function startServiceWorkerFileDownload(bytes, filename, mime) {
+    const ctrl = navigator.serviceWorker.controller;
+    if (!ctrl) {
+      throw new Error("no service worker controller");
+    }
+    const id =
+      Math.random().toString(16).slice(2) + "-" + encodeURIComponent(filename);
+    const name = fileBasename(filename) || "conduit-received.bin";
+    ctrl.postMessage({
+      id,
+      type: "metadata",
+      name,
+      size: bytes.byteLength,
+      filetype: mime || "application/octet-stream",
+    });
+
+    const chunkSize = 64 * 1024;
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const end = Math.min(offset + chunkSize, bytes.byteLength);
+      const slice = bytes.subarray(offset, end);
+      const copyBuffer = slice.buffer.slice(
+        slice.byteOffset,
+        slice.byteOffset + slice.byteLength
+      );
+      ctrl.postMessage(
+        { id, type: "data", data: copyBuffer, offset },
+        [copyBuffer]
+      );
+      offset = end;
+    }
+    ctrl.postMessage({ id, type: "end" });
+
+    const iframe = document.createElement("iframe");
+    iframe.style.display = "none";
+    iframe.src = new URL("/_/" + id, window.location.origin).href;
+    document.body.appendChild(iframe);
+    setTimeout(() => {
+      iframe.remove();
+    }, 120000);
+  }
+
   function recvCliCommand(server, code) {
     return "conduit recv --server " + server + " " + code;
   }
@@ -85,6 +185,9 @@
     if (typeof globalThis.conduit === "undefined") {
       throw new Error("WASM did not register globalThis.conduit");
     }
+    if (typeof globalThis.conduit.sendText !== "function") {
+      throw new Error("WASM did not register conduit.sendText");
+    }
   }
 
   function renderQR(host, text) {
@@ -105,12 +208,13 @@
     );
   }
 
-  function wireUI() {
+  function wireUI(serviceWorkerDownloadOk) {
     const serverUrl = $("serverUrl");
     serverUrl.value = defaultServerUrl();
 
     const dropzone = $("dropzone");
     const fileInput = $("fileInput");
+    const pasteTarget = $("pasteTarget");
     const pickBtn = $("pickBtn");
     const sendFileName = $("sendFileName");
     const sendCode = $("sendCode");
@@ -129,8 +233,6 @@
     const recvProgress = $("recvProgress");
     const recvBar = $("recvBar");
     const recvStatus = $("recvStatus");
-    const recvDownload = $("recvDownload");
-    const recvLink = $("recvLink");
     const recvText = $("recvText");
     const recvTextLabel = $("recvTextLabel");
     const recvTextBody = $("recvTextBody");
@@ -155,6 +257,23 @@
     }
 
     pickBtn.addEventListener("click", () => fileInput.click());
+
+    pasteTarget.addEventListener("paste", (e) => {
+      const text = e.clipboardData && e.clipboardData.getData("text/plain");
+      if (text === "") {
+        return;
+      }
+      if (!text.trim()) {
+        return;
+      }
+      e.preventDefault();
+      if (!sendProgress.hidden) {
+        setStatus(sendStatus, "Busy.", "err");
+        return;
+      }
+      pasteTarget.value = "";
+      runSendText(text);
+    });
 
     ["dragenter", "dragover"].forEach((ev) => {
       dropzone.addEventListener(ev, (e) => {
@@ -204,26 +323,9 @@
       }
     });
 
-    async function runSend() {
-      const f = fileInput.files && fileInput.files[0];
-      if (!f) {
-        setStatus(sendStatus, "Choose a file first.", "err");
-        return;
-      }
-      const server = serverUrl.value.trim() || defaultServerUrl();
-      const buf = new Uint8Array(await f.arrayBuffer());
-
-      sendCode.hidden = true;
-      sendProgress.hidden = false;
-      recvDownload.hidden = true;
-      setBar(sendBar, 0);
-      setStatus(sendStatus, "Connecting…", null);
-
-      globalThis.conduit.send(
-        server,
-        buf,
-        f.name,
-        function onCode(code) {
+    function sendCallbacks(server) {
+      return {
+        onCode(code) {
           codeText.textContent = code;
           sendCode.hidden = false;
           const link = `${window.location.origin}${window.location.pathname}#${code}`;
@@ -231,20 +333,58 @@
           shareCliCmd.textContent = recvCliCommand(server, code);
           renderQR(qrHost, link);
         },
-        function onProgress(done, total) {
+        onProgress(done, total) {
           if (total > 0) {
             setBar(sendBar, done / total);
           }
         },
-        function onDone(err) {
+        onDone(err) {
           sendProgress.hidden = true;
           if (err != null && err !== undefined) {
             setStatus(sendStatus, String(err), "err");
             return;
           }
-          setStatus(sendStatus, "Sent successfully.", "ok");
-        }
-      );
+          setStatus(sendStatus, "Sent.", "ok");
+        },
+      };
+    }
+
+    async function runSend() {
+      if (!sendProgress.hidden) {
+        setStatus(sendStatus, "Busy.", "err");
+        return;
+      }
+      const f = fileInput.files && fileInput.files[0];
+      if (!f) {
+        setStatus(sendStatus, "Pick a file.", "err");
+        return;
+      }
+      const server = serverUrl.value.trim() || defaultServerUrl();
+      const buf = new Uint8Array(await f.arrayBuffer());
+
+      sendCode.hidden = true;
+      sendProgress.hidden = false;
+      setBar(sendBar, 0);
+      setStatus(sendStatus, "Connecting", null);
+
+      const cb = sendCallbacks(server);
+      globalThis.conduit.send(server, buf, f.name, cb.onCode, cb.onProgress, cb.onDone);
+    }
+
+    function runSendText(text) {
+      if (!sendProgress.hidden) {
+        setStatus(sendStatus, "Busy.", "err");
+        return;
+      }
+      const server = serverUrl.value.trim() || defaultServerUrl();
+      sendCode.hidden = true;
+      sendProgress.hidden = false;
+      setBar(sendBar, 0);
+      sendFileName.textContent = "Text · " + text.length;
+      setStatus(sendStatus, "Connecting", null);
+
+      const cb = sendCallbacks(server);
+      globalThis.conduit.sendText(server, text, cb.onCode, cb.onProgress, cb.onDone);
     }
 
     fileInput.addEventListener("change", () => {
@@ -262,17 +402,16 @@
     recvBtn.addEventListener("click", () => {
       const code = recvCode.value.trim();
       if (!code) {
-        setStatus(recvStatus, "Enter the code from the sender.", "err");
+        setStatus(recvStatus, "Code?", "err");
         return;
       }
       const server = serverUrl.value.trim() || defaultServerUrl();
       recvProgress.hidden = false;
       recvProgress.classList.add("indet");
-      recvDownload.hidden = true;
       recvText.hidden = true;
       recvTextBody.textContent = "";
       setBar(recvBar, 0);
-      setStatus(recvStatus, "Connecting…", null);
+      setStatus(recvStatus, "Connecting", null);
 
       globalThis.conduit.recv(
         server,
@@ -280,7 +419,7 @@
         function onProgress(n) {
           recvProgress.classList.remove("indet");
           setBar(recvBar, 1);
-          setStatus(recvStatus, "Receiving… " + n + " bytes", null);
+          setStatus(recvStatus, "↓ " + n + " B", null);
         },
         function onDone(err, data, filename, kind, mime) {
           recvProgress.hidden = true;
@@ -293,18 +432,32 @@
           if (isTextPayload(kind, mime)) {
             const text = decodeUtf8(bytes);
             recvTextBody.textContent = text;
-            recvTextLabel.textContent = filename ? "Received text · " + filename : "Received text";
+            recvTextLabel.textContent = filename || "Text";
             recvText.hidden = false;
-            setStatus(recvStatus, "Received " + bytes.length + " bytes.", "ok");
+            setStatus(recvStatus, "Done · " + bytes.length, "ok");
             return;
           }
           const type = mime || "application/octet-stream";
           const blob = new Blob([bytes], { type });
-          const url = URL.createObjectURL(blob);
-          recvLink.href = url;
-          recvLink.download = filename || "conduit-received.bin";
-          recvDownload.hidden = false;
-          setStatus(recvStatus, "Received " + bytes.length + " bytes.", "ok");
+          const outName = filename || "conduit-received.bin";
+          setStatus(recvStatus, "Done · " + bytes.length, "ok");
+
+          const useSw =
+            serviceWorkerDownloadOk && navigator.serviceWorker.controller;
+          if (useSw) {
+            try {
+              startServiceWorkerFileDownload(bytes, outName, type);
+            } catch (e) {
+              console.warn("conduit sw download:", e);
+              queueMicrotask(() => {
+                triggerBlobDownload(blob, outName);
+              });
+            }
+          } else {
+            queueMicrotask(() => {
+              triggerBlobDownload(blob, outName);
+            });
+          }
         }
       );
     });
@@ -315,13 +468,14 @@
   }
 
   loadWasm()
-    .then(() => {
-      wireUI();
+    .then(() => ensureServiceWorkerForDownload())
+    .then((swOk) => {
+      wireUI(swOk);
     })
     .catch((e) => {
       const p = document.createElement("p");
       p.className = "status err";
-      p.textContent = "Failed to load WebAssembly: " + (e.message || String(e));
+      p.textContent = "WASM: " + (e.message || String(e));
       document.body.prepend(p);
     });
 })();
