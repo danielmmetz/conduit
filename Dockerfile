@@ -1,22 +1,34 @@
 # syntax=docker/dockerfile:1
-# Multi-stage build: generates WASM assets, then compiles a static conduit-server.
-# Runtime is scratch + only the CA bundle (for HTTPS/WSS) and the binary.
+# Multi-stage build: compiles WASM and the server in parallel, then assembles
+# a scratch runtime image with just the CA bundle and the static binary.
 ARG GO_VERSION=1.26
 
-FROM golang:${GO_VERSION}-bookworm AS build
+FROM golang:${GO_VERSION}-bookworm AS base
 WORKDIR /src
-
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY . .
 ENV CGO_ENABLED=0
-RUN go generate ./cmd/conduit-server
-RUN go build -trimpath -ldflags="-s -w" -o /out/conduit-server ./cmd/conduit-server
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+FROM base AS wasm
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" \
+        -o /out/main.wasm ./cmd/conduit-wasm \
+ && cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" /out/wasm_exec.js
+
+FROM base AS server
+COPY . .
+COPY --from=wasm /out/main.wasm     ./cmd/conduit-server/web/main.wasm
+COPY --from=wasm /out/wasm_exec.js  ./cmd/conduit-server/web/wasm_exec.js
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -ldflags="-s -w" -o /out/conduit-server ./cmd/conduit-server
 
 FROM scratch
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --chmod=0555 --chown=65532:65532 --from=build /out/conduit-server /conduit-server
+COPY --from=server /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --chmod=0555 --chown=65532:65532 --from=server /out/conduit-server /conduit-server
 
 # Distroless-style UID (no /etc/passwd in scratch; numeric USER is fine).
 USER 65532:65532

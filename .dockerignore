@@ -1,6 +1,11 @@
 .git
 .cursor
+.claude
 *.md
+TODO.txt
 conduit
 conduit-server
 conduit-turn
+# Locally-generated wasm artifacts are rebuilt inside the image.
+cmd/conduit-server/web/main.wasm
+cmd/conduit-server/web/wasm_exec.js
