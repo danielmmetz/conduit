@@ -65,11 +65,10 @@ func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out, stder
 func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text string
-	var noRelay, forceRelay bool
+	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&text, "text", "", "text payload to send instead of a file")
-	fs.BoolVar(&noRelay, "no-relay", false, "refuse TURN; fail rather than fall back to a relayed path")
-	fs.BoolVar(&forceRelay, "force-relay", false, "force TURN; gather only relay candidates (useful for exercising the relay)")
+	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "send",
 		ShortUsage: "conduit send [--text <message> | <path>... | -] [--server URL]",
@@ -77,10 +76,6 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
-			policy, err := client.RelayPolicyFromFlags(noRelay, forceRelay)
-			if err != nil {
-				return fmt.Errorf("running send: %w", err)
-			}
 			src, err := openSource(text, args, stdin)
 			if err != nil {
 				return fmt.Errorf("running send: %w", err)
@@ -111,11 +106,10 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit recv", flag.ContinueOnError)
 	var server, outPath string
-	var noRelay, forceRelay bool
+	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&outPath, "o", "", "write the received payload to this path ('-' for stdout; default is the sender's filename for files or the working directory for directories)")
-	fs.BoolVar(&noRelay, "no-relay", false, "refuse TURN; fail rather than fall back to a relayed path")
-	fs.BoolVar(&forceRelay, "force-relay", false, "force TURN; gather only relay candidates (useful for exercising the relay)")
+	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "recv",
 		ShortUsage: "conduit recv <code> [-o PATH | -] [--server URL]",
@@ -123,10 +117,6 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
-			policy, err := client.RelayPolicyFromFlags(noRelay, forceRelay)
-			if err != nil {
-				return fmt.Errorf("running recv: %w", err)
-			}
 			if len(args) < 1 {
 				return fmt.Errorf("usage: conduit recv <code> [-]")
 			}

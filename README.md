@@ -75,11 +75,11 @@ tar c ./mydir | ./conduit send -    # stdin
 
 Without `-o`, files land at the sender's filename and directories extract into the current working directory.
 
-Relay behavior:
+Relay behavior, controlled by `--relay`:
 
-- Default: try direct WebRTC, fall back to TURN if the server advertises it.
-- `--no-relay`: strip TURN; fail if there is no direct path.
-- `--force-relay`: ICE relay-only (useful for exercising TURN).
+- `auto` (default): try direct WebRTC, fall back to TURN if the server advertises it.
+- `never`: strip TURN; fail if there is no direct path.
+- `always`: ICE relay-only (useful for exercising TURN).
 
 ## Web client
 

@@ -143,31 +143,35 @@ func TestSendRecvFileRoundTrip(t *testing.T) {
 	}
 }
 
-func TestRelayPolicy(t *testing.T) {
+func TestRelayPolicySet(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		noRelay, forceRelay bool
-		want                client.RelayPolicy
+		in   string
+		want client.RelayPolicy
 	}{
-		{false, false, client.RelayAuto},
-		{true, false, client.RelayNone},
-		{false, true, client.RelayOnly},
+		{"auto", client.RelayAuto},
+		{"never", client.RelayNone},
+		{"always", client.RelayOnly},
 	}
 	for _, c := range cases {
-		got, err := client.RelayPolicyFromFlags(c.noRelay, c.forceRelay)
-		if err != nil {
-			t.Errorf("RelayPolicyFromFlags(%v, %v) err = %v", c.noRelay, c.forceRelay, err)
+		var got client.RelayPolicy
+		if err := got.Set(c.in); err != nil {
+			t.Errorf("RelayPolicy.Set(%q) err = %v", c.in, err)
 		}
 		if got != c.want {
-			t.Errorf("RelayPolicyFromFlags(%v, %v) = %v, want %v", c.noRelay, c.forceRelay, got, c.want)
+			t.Errorf("RelayPolicy.Set(%q) = %v, want %v", c.in, got, c.want)
+		}
+		if rt := got.String(); rt != c.in {
+			t.Errorf("RelayPolicy(%v).String() = %q, want %q", got, rt, c.in)
 		}
 	}
 }
 
-func TestRelayPolicyConflict(t *testing.T) {
+func TestRelayPolicySetInvalid(t *testing.T) {
 	t.Parallel()
-	if _, err := client.RelayPolicyFromFlags(true, true); err == nil {
-		t.Fatal("RelayPolicyFromFlags(true, true) err = nil, want error")
+	var p client.RelayPolicy
+	if err := p.Set("bogus"); err == nil {
+		t.Fatal("RelayPolicy.Set(\"bogus\") err = nil, want error")
 	}
 }
 

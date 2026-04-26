@@ -19,7 +19,8 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// RelayPolicy selects how TURN / ICE relay is used.
+// RelayPolicy selects how TURN / ICE relay is used. It satisfies flag.Value
+// so callers can bind it to a CLI flag directly.
 type RelayPolicy int
 
 const (
@@ -28,19 +29,29 @@ const (
 	RelayOnly
 )
 
-// RelayPolicyFromFlags maps CLI flags to a policy (--no-relay and --force-relay
-// are mutually exclusive).
-func RelayPolicyFromFlags(noRelay, forceRelay bool) (RelayPolicy, error) {
-	switch {
-	case noRelay && forceRelay:
-		return RelayAuto, fmt.Errorf("choosing relay policy: --no-relay and --force-relay are mutually exclusive")
-	case noRelay:
-		return RelayNone, nil
-	case forceRelay:
-		return RelayOnly, nil
+func (r RelayPolicy) String() string {
+	switch r {
+	case RelayNone:
+		return "never"
+	case RelayOnly:
+		return "always"
 	default:
-		return RelayAuto, nil
+		return "auto"
 	}
+}
+
+func (r *RelayPolicy) Set(s string) error {
+	switch s {
+	case "auto":
+		*r = RelayAuto
+	case "never":
+		*r = RelayNone
+	case "always":
+		*r = RelayOnly
+	default:
+		return fmt.Errorf("invalid relay policy %q (want auto, never, or always)", s)
+	}
+	return nil
 }
 
 func (r RelayPolicy) transportPolicy() webrtc.ICETransportPolicy {
