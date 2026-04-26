@@ -72,10 +72,7 @@ archives:
         formats:
           - zip
     files:
-      - README.md
-      - docs/PLAN.md
-      - LICENSE*
-      - deploy/*
+      - none*
 
 checksum:
   name_template: checksums.txt
