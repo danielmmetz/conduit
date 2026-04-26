@@ -98,21 +98,143 @@ input[type="text"] {
   padding: 0.75rem 0.9rem;
 }
 
-.receive-row {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid var(--border);
+.instructions {
+  margin: 0 0 0.5rem;
 }
 
-.receive-row input[type="text"] {
+.open-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.open-row input[type="text"] {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.receive-row button {
+.open-row button {
   flex: 0 0 auto;
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.open-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.transfer-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.transfer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 0.9rem;
+}
+
+.transfer-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-word;
+}
+
+.transfer-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.transfer-out .transfer-label {
+  color: var(--accent);
+}
+
+.transfer.ok {
+  border-color: color-mix(in srgb, var(--ok) 60%, var(--border));
+}
+
+.transfer.err {
+  border-color: color-mix(in srgb, var(--err) 60%, var(--border));
+}
+
+.transfer-text-body {
+  flex: 1 0 100%;
+  margin: 0.35rem 0 0;
+  padding: 0.4rem 0.55rem;
+  border-radius: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.35;
+  max-height: 18rem;
+  overflow: auto;
+}
+
+.transfer-copy {
+  flex: 0 0 auto;
+}
+
+.dropzone.disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.paired-actions {
+  margin-top: 0.5rem;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.close-inline {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.65rem;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.close-inline:hover:not(:disabled) {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 60%, var(--border));
+}
+
+.close-inline:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#reopenBtn {
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .dropzone {

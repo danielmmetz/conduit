@@ -20,41 +20,26 @@
         <input type="url" id="serverUrl" autocomplete="off" />
       </label>
 
-      <section class="panel">
-        <div
-          class="dropzone"
-          id="dropzone"
-          tabindex="0"
-          aria-label="Send a file"
-        >
-          <p>Drop or <button type="button" id="pickBtn">choose</button> a file to send</p>
-          <input type="file" id="fileInput" hidden />
-        </div>
-        <label class="field paste-field">
-          <textarea
-            id="pasteTarget"
-            rows="3"
-            autocomplete="off"
-            spellcheck="true"
-            aria-label="Paste to send text"
-            placeholder="Paste text to send"
-          ></textarea>
-        </label>
-        <p id="sendFileName" class="muted"></p>
-
-        <div class="receive-row">
+      <section class="panel" id="idlePanel">
+        <p class="muted instructions">
+          Type a code to join a session, or leave blank to create one.
+        </p>
+        <form id="idleForm" class="open-row">
           <input
             type="text"
-            id="recvCode"
-            placeholder="code to receive"
+            id="phraseInput"
+            placeholder="phrase (or blank to create)"
             autocomplete="off"
             spellcheck="false"
-            aria-label="Code to receive"
+            aria-label="Session phrase"
           />
-          <button type="button" id="recvBtn">Receive</button>
-        </div>
+          <button type="submit" id="openBtn">Open</button>
+        </form>
+        <p id="idleStatus" class="status" role="status"></p>
+      </section>
 
-        <div id="sendCode" class="code-box" hidden>
+      <section class="panel" id="pairedPanel" hidden>
+        <div id="hostCode" class="code-box" hidden>
           <p class="label">Code</p>
           <code id="codeText"></code>
           <div class="share-block-wrap">
@@ -74,22 +59,37 @@
           <div id="qrHost"></div>
         </div>
 
-        <div class="progress" id="sendProgress" hidden>
-          <div class="bar" id="sendBar"></div>
+        <div
+          class="dropzone"
+          id="dropzone"
+          tabindex="0"
+          aria-label="Send a file"
+        >
+          <p>Drop or <button type="button" id="pickBtn">choose</button> a file to send</p>
+          <input type="file" id="fileInput" hidden />
         </div>
-        <div class="progress" id="recvProgress" hidden>
-          <div class="bar" id="recvBar"></div>
-        </div>
-        <p id="sendStatus" class="status" role="status"></p>
-        <p id="recvStatus" class="status" role="status"></p>
+        <label class="field paste-field">
+          <textarea
+            id="pasteTarget"
+            rows="3"
+            autocomplete="off"
+            spellcheck="true"
+            aria-label="Paste to send text"
+            placeholder="Paste text to send"
+          ></textarea>
+        </label>
 
-        <div id="recvText" class="text-box" hidden>
-          <div class="text-box-header">
-            <span class="muted" id="recvTextLabel">Text</span>
-            <button type="button" id="recvCopyBtn">Copy</button>
-          </div>
-          <pre id="recvTextBody"></pre>
+        <ul id="transferList" class="transfer-list" hidden></ul>
+
+        <p id="pairedStatus" class="status" role="status"></p>
+        <div class="paired-actions">
+          <button type="button" id="closeBtn" class="close-inline">End session</button>
         </div>
+      </section>
+
+      <section class="panel" id="closedPanel" hidden>
+        <p class="muted">Session ended.</p>
+        <button type="button" id="reopenBtn">Open another</button>
       </section>
     </main>
 

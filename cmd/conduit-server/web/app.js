@@ -29,21 +29,11 @@
     }
   }
 
-  function setBar(barEl, frac) {
-    const p = Math.max(0, Math.min(1, frac));
-    barEl.style.width = (p * 100).toFixed(2) + "%";
-  }
-
-  // formatBytes renders a binary-prefixed byte count using KB/MB/GB labels —
-  // matches the CLI's humanBytes so both surfaces read the same.
+  // formatBytes renders a binary-prefixed byte count using KB/MB/GB labels.
   function formatBytes(n) {
-    if (n == null || n < 0) {
-      return "";
-    }
+    if (n == null || n < 0) return "";
     const unit = 1024;
-    if (n < unit) {
-      return n + " B";
-    }
+    if (n < unit) return n + " B";
     const units = ["KB", "MB", "GB", "TB", "PB"];
     let div = unit;
     let exp = 0;
@@ -54,26 +44,8 @@
     return (n / div).toFixed(1) + " " + units[exp];
   }
 
-  // throttledProgress returns a wrapper that calls fn at most once per minMs,
-  // except the first call always fires and any call where done >= total (a
-  // final-progress update) bypasses the throttle so the user sees the 100% tick.
-  function throttledProgress(fn, minMs) {
-    let last = 0;
-    return (done, total) => {
-      const now = performance.now();
-      const final = total > 0 && done >= total;
-      if (!final && last !== 0 && now - last < minMs) {
-        return;
-      }
-      last = now;
-      fn(done, total);
-    };
-  }
-
   function isTextPayload(kind, mime) {
-    if (kind === "text") {
-      return true;
-    }
+    if (kind === "text") return true;
     if (typeof mime === "string" && mime.toLowerCase().startsWith("text/")) {
       return true;
     }
@@ -97,28 +69,19 @@
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => {
-      URL.revokeObjectURL(url);
-    }, 5000);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   }
 
   function fileBasename(name) {
-    if (!name || typeof name !== "string") {
-      return "";
-    }
+    if (!name || typeof name !== "string") return "";
     const parts = name.replace(/\\/g, "/").split("/");
     const base = parts.pop();
     return base || "";
   }
 
-  /** Same idea as webwormhole: Safari cannot rely on SW-driven downloads. */
   function prefersServiceWorkerDownload() {
-    if (!("serviceWorker" in navigator)) {
-      return false;
-    }
-    if (!window.isSecureContext) {
-      return false;
-    }
+    if (!("serviceWorker" in navigator)) return false;
+    if (!window.isSecureContext) return false;
     if (
       /Safari/.test(navigator.userAgent) &&
       !/Chrome|Chromium/.test(navigator.userAgent)
@@ -129,9 +92,7 @@
   }
 
   async function ensureServiceWorkerForDownload() {
-    if (!prefersServiceWorkerDownload()) {
-      return false;
-    }
+    if (!prefersServiceWorkerDownload()) return false;
     try {
       await navigator.serviceWorker.register("/sw.js", { scope: "/" });
       await navigator.serviceWorker.ready;
@@ -142,10 +103,6 @@
     }
   }
 
-  /**
-   * Stream bytes to the service worker, then open a hidden iframe on /_/id so
-   * the worker responds with Content-Disposition: attachment (Web Wormhole pattern).
-   */
   function startServiceWorkerFileDownload(bytes, filename, mime) {
     const ctrl = navigator.serviceWorker.controller;
     if (!ctrl) {
@@ -161,7 +118,6 @@
       size: bytes.byteLength,
       filetype: mime || "application/octet-stream",
     });
-
     const chunkSize = 64 * 1024;
     let offset = 0;
     while (offset < bytes.byteLength) {
@@ -171,21 +127,17 @@
         slice.byteOffset,
         slice.byteOffset + slice.byteLength
       );
-      ctrl.postMessage(
-        { id, type: "data", data: copyBuffer, offset },
-        [copyBuffer]
-      );
+      ctrl.postMessage({ id, type: "data", data: copyBuffer, offset }, [
+        copyBuffer,
+      ]);
       offset = end;
     }
     ctrl.postMessage({ id, type: "end" });
-
     const iframe = document.createElement("iframe");
     iframe.style.display = "none";
     iframe.src = new URL("/_/" + id, window.location.origin).href;
     document.body.appendChild(iframe);
-    setTimeout(() => {
-      iframe.remove();
-    }, 120000);
+    setTimeout(() => iframe.remove(), 120000);
   }
 
   function recvCliCommand(server, code) {
@@ -213,12 +165,8 @@
 
   function parseHashCode() {
     const h = window.location.hash.replace(/^#/, "").trim();
-    if (!h) {
-      return "";
-    }
-    if (/^\d+-/.test(h)) {
-      return h;
-    }
+    if (!h) return "";
+    if (/^\d+-/.test(h)) return h;
     return "";
   }
 
@@ -233,26 +181,22 @@
     if (typeof globalThis.conduit === "undefined") {
       throw new Error("WASM did not register globalThis.conduit");
     }
-    if (typeof globalThis.conduit.sendText !== "function") {
-      throw new Error("WASM did not register conduit.sendText");
+    if (typeof globalThis.conduit.openSender !== "function") {
+      throw new Error("WASM did not register conduit.openSender");
     }
     if (typeof globalThis.conduit.qr !== "function") {
       throw new Error("WASM did not register conduit.qr");
     }
   }
 
-  // renderQR draws text as a QR code into host. Uses globalThis.conduit.qr —
-  // the same rsc.io/qr encoder the CLI uses — so the page has no third-party
-  // QR dependency. The 4-module quiet zone matches the CLI and the QR spec.
+  // renderQR draws text as a QR code into host.
   function renderQR(host, text) {
     host.replaceChildren();
     if (!text || typeof globalThis.conduit?.qr !== "function") {
       return;
     }
     const result = globalThis.conduit.qr(text);
-    if (!result) {
-      return;
-    }
+    if (!result) return;
     const { size, modules } = result;
     const quiet = 4;
     const cells = size + quiet * 2;
@@ -279,81 +223,213 @@
     host.appendChild(canvas);
   }
 
+  // Session-mode UI state machine.
+  //
+  // States: "idle" → "opening" → "paired" → "closing" → "closed".
+  //
+  // - idle: phrase input + Open button. Empty submit creates a new session
+  //   (sender role); a typed phrase joins one (receiver role). The role
+  //   distinction only matters at handshake time; once paired both peers
+  //   have the same controls.
+  // - paired: dropzone + paste + transfer list. Either side can push
+  //   files/text; inbound transfers are appended to the list as they arrive.
+  // - closed: "Open another" button to return to idle.
   function wireUI(serviceWorkerDownloadOk) {
     const serverUrl = $("serverUrl");
     serverUrl.value = defaultServerUrl();
-    // The Server field starts hidden via inline style in index.html so the
-    // common hosted case avoids a flash before this code runs. Reveal it
-    // (clearing the inline rule lets .field's display:flex take over) only
-    // when we can't reach the hosted default for the user.
     if (!isDefaultOrigin()) {
       const field = serverUrl.closest("label.field");
-      if (field) {
-        field.style.display = "";
-      }
+      if (field) field.style.display = "";
     }
 
-    const dropzone = $("dropzone");
-    const fileInput = $("fileInput");
-    const pasteTarget = $("pasteTarget");
-    const pickBtn = $("pickBtn");
-    const sendFileName = $("sendFileName");
-    const sendCode = $("sendCode");
+    const idlePanel = $("idlePanel");
+    const idleForm = $("idleForm");
+    const phraseInput = $("phraseInput");
+    const openBtn = $("openBtn");
+    const idleStatus = $("idleStatus");
+
+    const pairedPanel = $("pairedPanel");
+    const hostCode = $("hostCode");
     const codeText = $("codeText");
     const shareBrowserUrl = $("shareBrowserUrl");
     const shareCliCmd = $("shareCliCmd");
     const copyBrowserUrlBtn = $("copyBrowserUrlBtn");
     const copyCliCmdBtn = $("copyCliCmdBtn");
     const qrHost = $("qrHost");
-    const sendProgress = $("sendProgress");
-    const sendBar = $("sendBar");
-    const sendStatus = $("sendStatus");
+    const dropzone = $("dropzone");
+    const fileInput = $("fileInput");
+    const pickBtn = $("pickBtn");
+    const pasteTarget = $("pasteTarget");
+    const transferList = $("transferList");
+    const pairedStatus = $("pairedStatus");
+    const closeBtn = $("closeBtn");
 
-    const recvCode = $("recvCode");
-    const recvBtn = $("recvBtn");
-    const recvProgress = $("recvProgress");
-    const recvBar = $("recvBar");
-    const recvStatus = $("recvStatus");
-    const recvText = $("recvText");
-    const recvTextLabel = $("recvTextLabel");
-    const recvTextBody = $("recvTextBody");
-    const recvCopyBtn = $("recvCopyBtn");
+    const closedPanel = $("closedPanel");
+    const reopenBtn = $("reopenBtn");
 
-    recvCopyBtn.addEventListener("click", async () => {
-      const text = recvTextBody.textContent || "";
-      await copyWithFlash(recvCopyBtn, text, "Copy");
-    });
+    let sessionId = null;
+    let transferCount = 0;
 
     copyBrowserUrlBtn.addEventListener("click", () => {
       copyWithFlash(copyBrowserUrlBtn, shareBrowserUrl.textContent || "", "Copy");
     });
-
     copyCliCmdBtn.addEventListener("click", () => {
       copyWithFlash(copyCliCmdBtn, shareCliCmd.textContent || "", "Copy");
     });
 
-    const hashCode = parseHashCode();
-    if (hashCode) {
-      recvCode.value = hashCode;
+    function gotoIdle() {
+      idlePanel.hidden = false;
+      pairedPanel.hidden = true;
+      closedPanel.hidden = true;
+      hostCode.hidden = true;
+      transferList.hidden = true;
+      transferList.replaceChildren();
+      transferCount = 0;
+      sessionId = null;
+      setStatus(idleStatus, "", null);
+      setStatus(pairedStatus, "", null);
+      qrHost.replaceChildren();
+      const hashCode = parseHashCode();
+      phraseInput.value = hashCode;
+      openBtn.disabled = false;
+      phraseInput.disabled = false;
+      phraseInput.focus();
+    }
+
+    function gotoPaired(hostCodeData) {
+      idlePanel.hidden = true;
+      pairedPanel.hidden = false;
+      closedPanel.hidden = true;
+      if (hostCodeData) {
+        codeText.textContent = hostCodeData.code;
+        shareBrowserUrl.textContent = hostCodeData.link;
+        shareCliCmd.textContent = hostCodeData.cli;
+        renderQR(qrHost, hostCodeData.link);
+        hostCode.hidden = false;
+      } else {
+        hostCode.hidden = true;
+      }
+      transferList.hidden = false;
+    }
+
+    function gotoClosed() {
+      idlePanel.hidden = true;
+      pairedPanel.hidden = true;
+      closedPanel.hidden = false;
+    }
+
+    function appendTransfer(direction, name, totalBytes) {
+      transferList.hidden = false;
+      const li = document.createElement("li");
+      li.className = "transfer transfer-" + direction;
+      const arrow = direction === "out" ? "↑" : "↓";
+      const label = document.createElement("span");
+      label.className = "transfer-label";
+      label.textContent = `${arrow} ${name || "untitled"}`;
+      const meta = document.createElement("span");
+      meta.className = "transfer-meta";
+      meta.textContent = totalBytes != null ? formatBytes(totalBytes) : "";
+      li.appendChild(label);
+      li.appendChild(meta);
+      transferList.appendChild(li);
+      transferCount++;
+      return { li, label, meta };
+    }
+
+    function buildHostCodeData(server, code) {
+      const link = `${window.location.origin}${window.location.pathname}#${code}`;
+      const cli = recvCliCommand(server, code);
+      return { code, link, cli };
+    }
+
+    function onIncomingTransfer(preamble, bytesUA) {
+      const bytes = new Uint8Array(bytesUA);
+      const name = preamble.name || (preamble.kind === "text" ? "text" : "file");
+      const meta = appendTransfer("in", name, bytes.byteLength);
+      if (isTextPayload(preamble.kind, preamble.mime)) {
+        const text = decodeUtf8(bytes);
+        const pre = document.createElement("pre");
+        pre.className = "transfer-text-body";
+        pre.textContent = text;
+        meta.li.appendChild(pre);
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.className = "copy-inline transfer-copy";
+        copy.textContent = "Copy";
+        copy.addEventListener("click", () => {
+          copyWithFlash(copy, text, "Copy");
+        });
+        meta.li.appendChild(copy);
+      } else {
+        const type = preamble.mime || "application/octet-stream";
+        const outName = preamble.name || "conduit-received.bin";
+        const blob = new Blob([bytes], { type });
+        const useSw =
+          serviceWorkerDownloadOk && navigator.serviceWorker.controller;
+        if (useSw) {
+          try {
+            startServiceWorkerFileDownload(bytes, outName, type);
+          } catch (e) {
+            console.warn("conduit sw download:", e);
+            queueMicrotask(() => triggerBlobDownload(blob, outName));
+          }
+        } else {
+          queueMicrotask(() => triggerBlobDownload(blob, outName));
+        }
+        const dlBtn = document.createElement("button");
+        dlBtn.type = "button";
+        dlBtn.className = "copy-inline transfer-copy";
+        dlBtn.textContent = "Re-download";
+        dlBtn.addEventListener("click", () => triggerBlobDownload(blob, outName));
+        meta.li.appendChild(dlBtn);
+      }
+    }
+
+    function pushFile(file) {
+      if (sessionId == null) return;
+      const meta = appendTransfer("out", file.name, file.size);
+      file.arrayBuffer().then((ab) => {
+        const buf = new Uint8Array(ab);
+        const mime = file.type || "application/octet-stream";
+        globalThis.conduit.sessionPushFile(
+          sessionId,
+          buf,
+          file.name,
+          mime,
+          (err) => {
+            if (err != null && err !== undefined) {
+              meta.meta.textContent = String(err);
+              meta.li.classList.add("err");
+              return;
+            }
+            meta.meta.textContent = formatBytes(file.size) + " · sent";
+            meta.li.classList.add("ok");
+          }
+        );
+      });
+    }
+
+    function pushText(text) {
+      if (sessionId == null) return;
+      const size = new TextEncoder().encode(text).length;
+      const meta = appendTransfer("out", "text", size);
+      globalThis.conduit.sessionPushText(sessionId, text, (err) => {
+        if (err != null && err !== undefined) {
+          meta.meta.textContent = String(err);
+          meta.li.classList.add("err");
+          return;
+        }
+        meta.meta.textContent = formatBytes(size) + " · sent";
+        meta.li.classList.add("ok");
+      });
     }
 
     pickBtn.addEventListener("click", () => fileInput.click());
-
-    pasteTarget.addEventListener("paste", (e) => {
-      const text = e.clipboardData && e.clipboardData.getData("text/plain");
-      if (text === "") {
-        return;
-      }
-      if (!text.trim()) {
-        return;
-      }
-      e.preventDefault();
-      if (!sendProgress.hidden) {
-        setStatus(sendStatus, "Busy.", "err");
-        return;
-      }
-      pasteTarget.value = "";
-      runSendText(text);
+    fileInput.addEventListener("change", () => {
+      const f = fileInput.files && fileInput.files[0];
+      if (!f) return;
+      pushFile(f);
+      fileInput.value = "";
     });
 
     ["dragenter", "dragover"].forEach((ev) => {
@@ -372,30 +448,14 @@
     });
     dropzone.addEventListener("drop", (e) => {
       const f = e.dataTransfer.files && e.dataTransfer.files[0];
-      if (f) {
-        fileInput.files = e.dataTransfer.files;
-        sendFileName.textContent = f.name;
-        runSend().catch((err) => {
-          setStatus(sendStatus, err.message || String(err), "err");
-          sendProgress.hidden = true;
-        });
-      }
+      if (f) pushFile(f);
     });
-
     dropzone.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         fileInput.click();
       }
     });
-
-    window.addEventListener("hashchange", () => {
-      const c = parseHashCode();
-      if (c) {
-        recvCode.value = c;
-      }
-    });
-
     dropzone.addEventListener("click", (e) => {
       if (e.target === dropzone || e.target.closest("p")) {
         if (e.target !== pickBtn && !e.target.closest("button")) {
@@ -404,165 +464,108 @@
       }
     });
 
-    function sendCallbacks(server) {
-      const onProgress = throttledProgress((done, total) => {
-        if (total > 0) {
-          setBar(sendBar, done / total);
-          setStatus(sendStatus, "↑ " + formatBytes(done) + " / " + formatBytes(total), null);
-        } else {
-          setStatus(sendStatus, "↑ " + formatBytes(done), null);
-        }
-      }, 100);
-      return {
-        onCode(code) {
-          codeText.textContent = code;
-          sendCode.hidden = false;
-          const link = `${window.location.origin}${window.location.pathname}#${code}`;
-          shareBrowserUrl.textContent = link;
-          shareCliCmd.textContent = recvCliCommand(server, code);
-          renderQR(qrHost, link);
-        },
-        onProgress,
-        onDone(err) {
-          sendProgress.hidden = true;
-          if (err != null && err !== undefined) {
-            setStatus(sendStatus, String(err), "err");
-            return;
+    pasteTarget.addEventListener("paste", (e) => {
+      const text = e.clipboardData && e.clipboardData.getData("text/plain");
+      if (!text || !text.trim()) return;
+      e.preventDefault();
+      pasteTarget.value = "";
+      pushText(text);
+    });
+
+    closeBtn.addEventListener("click", () => {
+      if (sessionId == null) return;
+      setStatus(pairedStatus, "Closing…", null);
+      closeBtn.disabled = true;
+      globalThis.conduit.sessionClose(sessionId);
+    });
+
+    reopenBtn.addEventListener("click", () => gotoIdle());
+
+    idleForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const phrase = phraseInput.value.trim();
+      const server = serverUrl.value.trim() || defaultServerUrl();
+      openBtn.disabled = true;
+      phraseInput.disabled = true;
+      setStatus(idleStatus, "Connecting…", null);
+
+      const callbacks = {
+        onCode: (code) => {
+          if (!phrase) {
+            const data = buildHostCodeData(server, code);
+            // Display the code immediately while waiting for the peer.
+            codeText.textContent = data.code;
+            shareBrowserUrl.textContent = data.link;
+            shareCliCmd.textContent = data.cli;
+            renderQR(qrHost, data.link);
+            hostCode.hidden = false;
+            // Move into the paired panel pre-pair so the user can see the code
+            // and QR; transfer controls get enabled in onPaired.
+            idlePanel.hidden = true;
+            pairedPanel.hidden = false;
+            transferList.hidden = false;
+            setStatus(pairedStatus, "Waiting for peer…", null);
+            // Disable inputs until paired.
+            dropzone.classList.add("disabled");
+            pasteTarget.disabled = true;
           }
-          setStatus(sendStatus, "Sent.", "ok");
+        },
+        onPaired: () => {
+          if (!phrase) {
+            setStatus(pairedStatus, "Connected.", "ok");
+          } else {
+            gotoPaired(null);
+            setStatus(pairedStatus, "Connected.", "ok");
+          }
+          dropzone.classList.remove("disabled");
+          pasteTarget.disabled = false;
+          closeBtn.disabled = false;
+        },
+        onTransfer: onIncomingTransfer,
+        onError: (msg) => {
+          setStatus(pairedStatus, String(msg), "err");
+          setStatus(idleStatus, String(msg), "err");
+          openBtn.disabled = false;
+          phraseInput.disabled = false;
+          sessionId = null;
+        },
+        onClosed: () => {
+          gotoClosed();
         },
       };
-    }
 
-    async function runSend() {
-      if (!sendProgress.hidden) {
-        setStatus(sendStatus, "Busy.", "err");
-        return;
+      if (phrase) {
+        sessionId = globalThis.conduit.openReceiver(server, phrase, callbacks);
+      } else {
+        sessionId = globalThis.conduit.openSender(server, callbacks);
       }
-      const f = fileInput.files && fileInput.files[0];
-      if (!f) {
-        setStatus(sendStatus, "Pick a file.", "err");
-        return;
+      if (!sessionId) {
+        setStatus(idleStatus, "Could not open session.", "err");
+        openBtn.disabled = false;
+        phraseInput.disabled = false;
       }
-      const server = serverUrl.value.trim() || defaultServerUrl();
-      const buf = new Uint8Array(await f.arrayBuffer());
-
-      sendCode.hidden = true;
-      sendProgress.hidden = false;
-      setBar(sendBar, 0);
-      setStatus(sendStatus, "Connecting", null);
-
-      const cb = sendCallbacks(server);
-      globalThis.conduit.send(server, buf, f.name, cb.onCode, cb.onProgress, cb.onDone);
-    }
-
-    function runSendText(text) {
-      if (!sendProgress.hidden) {
-        setStatus(sendStatus, "Busy.", "err");
-        return;
-      }
-      const server = serverUrl.value.trim() || defaultServerUrl();
-      sendCode.hidden = true;
-      sendProgress.hidden = false;
-      setBar(sendBar, 0);
-      sendFileName.textContent = "Text · " + formatBytes(text.length);
-      setStatus(sendStatus, "Connecting", null);
-
-      const cb = sendCallbacks(server);
-      globalThis.conduit.sendText(server, text, cb.onCode, cb.onProgress, cb.onDone);
-    }
-
-    fileInput.addEventListener("change", () => {
-      const f = fileInput.files && fileInput.files[0];
-      sendFileName.textContent = f ? f.name : "";
-      if (!f) {
-        return;
-      }
-      runSend().catch((e) => {
-        setStatus(sendStatus, e.message || String(e), "err");
-        sendProgress.hidden = true;
-      });
     });
 
-    recvBtn.addEventListener("click", () => {
-      const code = recvCode.value.trim();
-      if (!code) {
-        setStatus(recvStatus, "Code?", "err");
-        return;
-      }
-      const server = serverUrl.value.trim() || defaultServerUrl();
-      recvProgress.hidden = false;
-      recvProgress.classList.add("indet");
-      recvText.hidden = true;
-      recvTextBody.textContent = "";
-      setBar(recvBar, 0);
-      setStatus(recvStatus, "Connecting", null);
-
-      const onRecvProgress = throttledProgress((received, total) => {
-        recvProgress.classList.remove("indet");
-        if (total > 0) {
-          setBar(recvBar, received / total);
-          setStatus(recvStatus, "↓ " + formatBytes(received) + " / " + formatBytes(total), null);
-        } else {
-          setBar(recvBar, 1);
-          setStatus(recvStatus, "↓ " + formatBytes(received), null);
-        }
-      }, 100);
-      globalThis.conduit.recv(
-        server,
-        code,
-        onRecvProgress,
-        function onDone(err, data, filename, kind, mime) {
-          recvProgress.hidden = true;
-          recvProgress.classList.remove("indet");
-          if (err != null && err !== undefined) {
-            setStatus(recvStatus, String(err), "err");
-            return;
-          }
-          const bytes = new Uint8Array(data);
-          if (isTextPayload(kind, mime)) {
-            const text = decodeUtf8(bytes);
-            recvTextBody.textContent = text;
-            recvTextLabel.textContent = filename || "Text";
-            recvText.hidden = false;
-            setStatus(recvStatus, "Done · " + formatBytes(bytes.length), "ok");
-            return;
-          }
-          const type = mime || "application/octet-stream";
-          const blob = new Blob([bytes], { type });
-          const outName = filename || "conduit-received.bin";
-          setStatus(recvStatus, "Done · " + formatBytes(bytes.length), "ok");
-
-          const useSw =
-            serviceWorkerDownloadOk && navigator.serviceWorker.controller;
-          if (useSw) {
-            try {
-              startServiceWorkerFileDownload(bytes, outName, type);
-            } catch (e) {
-              console.warn("conduit sw download:", e);
-              queueMicrotask(() => {
-                triggerBlobDownload(blob, outName);
-              });
-            }
-          } else {
-            queueMicrotask(() => {
-              triggerBlobDownload(blob, outName);
-            });
-          }
-        }
-      );
+    window.addEventListener("hashchange", () => {
+      if (idlePanel.hidden) return;
+      const c = parseHashCode();
+      if (c) phraseInput.value = c;
     });
 
-    if (hashCode) {
-      recvBtn.click();
+    gotoIdle();
+
+    // If the URL arrived with a code in the hash, auto-submit so the receiver
+    // flow runs without an extra click.
+    const initialHash = parseHashCode();
+    if (initialHash) {
+      phraseInput.value = initialHash;
+      idleForm.requestSubmit();
     }
   }
 
   loadWasm()
     .then(() => ensureServiceWorkerForDownload())
-    .then((swOk) => {
-      wireUI(swOk);
-    })
+    .then((swOk) => wireUI(swOk))
     .catch((e) => {
       const p = document.createElement("p");
       p.className = "status err";
