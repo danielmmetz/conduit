@@ -315,16 +315,24 @@ func (s *Session) Pull(ctx context.Context, dst io.Writer) error {
 	}
 }
 
-// Close tears down the session. Both peers must call Close — exchangeTeardown
-// is a synchronous handshake on the signaling channel. The data channel is
-// then closed bilaterally so both demuxers drain on EOF cleanly.
+// Close tears down the session. exchangeTeardown is best-effort with a
+// short timeout so a peer that wants to keep its half of the session open
+// (e.g. a browser sender that has more transfers to do) does not pin this
+// peer's Close indefinitely. Whether or not teardown completes, the data
+// channel is closed locally; the peer's WebRTC stack observes the cascade
+// and surfaces a connection-closed error to its own session machinery.
 //
 // Idempotent — second and later calls return the first error.
 func (s *Session) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
-		if err := exchangeTeardown(ctx, s.sig, s.key); err != nil {
+		teardownCtx, teardownCancel := context.WithTimeout(ctx, teardownTimeout)
+		err := exchangeTeardown(teardownCtx, s.sig, s.key)
+		teardownCancel()
+		if err != nil {
 			s.cfg.Logger.DebugContext(ctx, "session teardown handshake", slog.String("err", err.Error()))
-			s.closeErr = fmt.Errorf("close: teardown: %w", err)
+			// Don't propagate as a Close error — the local close still
+			// succeeds and the peer-disagreement case is expected when
+			// the other side wants its session to remain open.
 		}
 		_ = s.raw.Close()
 		closeTimer := time.NewTimer(5 * time.Second)
@@ -344,6 +352,12 @@ func (s *Session) Close(ctx context.Context) error {
 	})
 	return s.closeErr
 }
+
+// teardownTimeout bounds exchangeTeardown during Close. Long enough that a
+// cooperating peer almost always responds within it; short enough that a
+// session-mode peer (which deliberately stays open between transfers)
+// doesn't make the local side feel hung.
+const teardownTimeout = 2 * time.Second
 
 // lockedTagWriter is tagWriter with a mutex around each frame Write so it
 // shares the data channel safely with sessionAckingWriter, and chunks

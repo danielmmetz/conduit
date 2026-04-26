@@ -124,6 +124,7 @@ func (b *wasmBridge) openSenderJS(parent context.Context, args []js.Value) any {
 		}
 		h.sess = sess
 		safeInvoke(onPaired)
+		b.watchPeerClose(h, id)
 	})
 	return id
 }
@@ -170,8 +171,34 @@ func (b *wasmBridge) openReceiverJS(parent context.Context, args []js.Value) any
 		}
 		h.sess = sess
 		safeInvoke(onPaired)
+		b.watchPeerClose(h, id)
 	})
 	return id
+}
+
+// watchPeerClose blocks until the inbound pump exits, then fires onClosed
+// — the peer terminated the session from their side (CLI recv that
+// finished and closed, browser tab that ended the session, network drop
+// on the other side, etc.). Without this watcher the JS UI stays in the
+// paired state and any subsequent push fails with a confusing "write to
+// closed dc" error rather than the clean "session ended" transition the
+// state machine expects.
+func (b *wasmBridge) watchPeerClose(h *sessionHandle, id string) {
+	if h.sess == nil {
+		return
+	}
+	// PumpErr blocks on pumpDone — fires once the rtc.Session demuxer
+	// surfaces io.EOF (peer closed) or any other terminal error.
+	_ = h.sess.PumpErr()
+	if !h.closed.CompareAndSwap(false, true) {
+		return
+	}
+	defer b.sessions.remove(id)
+	defer h.cancel()
+	// Best-effort local close: the rtc layer's exchangeTeardown will
+	// short-timeout because the peer is already gone.
+	_ = h.sess.Close(h.ctx)
+	safeInvoke(h.onClosed)
 }
 
 // sessionPushFileJS(sessionId, payload, filename, mimeType, onDone)
