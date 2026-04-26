@@ -15,42 +15,43 @@ import (
 
 // A Session is a persistent, bidirectional WebRTC connection between two
 // peers. Either peer may stream outbound transfers via Push and accept
-// inbound transfers via Pull; the two directions ride on independent SCTP
-// streams and run concurrently. Within a direction, transfers serialize:
-// the next Push must wait for the previous Push to return.
+// inbound transfers via Pull; the two directions multiplex on the single
+// underlying data channel via the framing.go tag system. Within a
+// direction, transfers serialize: the next Push must wait for the previous
+// Push to return. Opposite-direction transfers may run concurrently — the
+// shared frame writer is mutex-protected so each Write produces one
+// complete frame.
 //
 // Open a session by paired calls to Initiate (one peer) and Respond (the
-// other). After Open, the peers' APIs are symmetric — there is no
+// other). After open, the peers' APIs are symmetric — there is no
 // sender/receiver role at the session level. Call Close to tear down.
 //
-// The two data channels are pre-negotiated with fixed SCTP stream IDs, so
-// both peers create them locally with identical parameters. The DC at ID 0
-// (i2r) is written by the initiator, read by the responder. The DC at ID 1
-// (r2i) is written by the responder, read by the initiator. Each Session
-// remembers which is its outbound and which is its inbound from the role
-// it played at open time.
+// Wire-compatible with v1 rtc.Send / rtc.Recv: the single DC is created
+// the same way and the framing tags are unchanged. A v1 sender → v2
+// receiver pairing works as a one-shot transfer; the v2 receiver's Pull
+// returns when the v1 sender's tagEOF arrives, and the rtc-level close
+// cascades back through exchangeTeardown.
 type Session struct {
-	cfg    Config
-	pc     *webrtc.PeerConnection
-	outDC  *webrtc.DataChannel
-	outRaw io.ReadWriteCloser
-	outW   io.Writer
-	inRaw  io.ReadWriteCloser
-	sig    wire.MsgConn
-	key    []byte
+	cfg Config
+	pc  *webrtc.PeerConnection
+	dc  *webrtc.DataChannel
+	raw io.ReadWriteCloser
+	w   io.Writer
+	sig wire.MsgConn
+	key []byte
 
-	// outMu serializes frame writes on the outbound DC. Both Push (payload
-	// tags) and Pull (ack tags) write here. Each Write is one complete
-	// frame; the mutex prevents two writers from interleaving frames.
-	outMu sync.Mutex
+	// writeMu serializes frame writes on the data channel. Push (tagData /
+	// tagEOF) and Pull's ack writer (tagAck) share the channel; each Write
+	// is one complete frame, and the mutex prevents two writers from
+	// interleaving frames.
+	writeMu sync.Mutex
 
 	// inFrames carries tagData / tagEOF dataFrames produced by the demuxer
 	// goroutine for Pull to consume. Capacity 0 — implicit backpressure.
 	inFrames chan dataFrame
 
 	// demuxDone is closed when the demuxer exits; demuxErr captures the
-	// terminal error (io.EOF or io.ErrClosedPipe on clean session close,
-	// otherwise the underlying read error).
+	// terminal error.
 	demuxDone   chan struct{}
 	demuxErr    error
 	demuxCancel context.CancelFunc
@@ -67,21 +68,15 @@ type dataFrame struct {
 	payload []byte
 }
 
-const (
-	dcLabelInitToResp        = "i2r"
-	dcLabelRespToInit        = "r2i"
-	dcStreamInitToResp uint16 = 0
-	dcStreamRespToInit uint16 = 1
-)
-
 // Initiate opens a session as the WebRTC offerer. The peer must call
-// Respond. Returns a ready-to-use Session or the first error encountered.
+// Respond. Wire-compatible with v1 rtc.Send: a v1 sender's Recv-style
+// counterpart can use Respond unchanged.
 func Initiate(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config) (*Session, error) {
 	return openSession(ctx, sig, key, cfg, true)
 }
 
 // Respond opens a session as the WebRTC answerer. The peer must call
-// Initiate.
+// Initiate. Wire-compatible with v1 rtc.Recv.
 func Respond(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config) (*Session, error) {
 	return openSession(ctx, sig, key, cfg, false)
 }
@@ -97,41 +92,38 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 		}
 	}()
 
-	negotiated := true
-	i2rID := dcStreamInitToResp
-	r2iID := dcStreamRespToInit
-	i2rDC, err := pc.CreateDataChannel(dcLabelInitToResp, &webrtc.DataChannelInit{Negotiated: &negotiated, ID: &i2rID})
-	if err != nil {
-		return nil, fmt.Errorf("opening session: creating i2r dc: %w", err)
-	}
-	r2iDC, err := pc.CreateDataChannel(dcLabelRespToInit, &webrtc.DataChannelInit{Negotiated: &negotiated, ID: &r2iID})
-	if err != nil {
-		return nil, fmt.Errorf("opening session: creating r2i dc: %w", err)
-	}
-
-	i2rWait := newDatachanWait()
-	r2iWait := newDatachanWait()
-	i2rDC.OnOpen(func() {
-		raw, err := i2rDC.Detach()
+	openWait := newDatachanWait()
+	var dc *webrtc.DataChannel
+	if initiator {
+		dc, err = pc.CreateDataChannel("conduit", nil)
 		if err != nil {
-			i2rWait.setErr(fmt.Errorf("detaching i2r dc: %w", err))
-			return
+			return nil, fmt.Errorf("opening session: creating dc: %w", err)
 		}
-		i2rWait.setRWC(raw)
-	})
-	r2iDC.OnOpen(func() {
-		raw, err := r2iDC.Detach()
-		if err != nil {
-			r2iWait.setErr(fmt.Errorf("detaching r2i dc: %w", err))
-			return
-		}
-		r2iWait.setRWC(raw)
-	})
+		dc.OnOpen(func() {
+			raw, err := dc.Detach()
+			if err != nil {
+				openWait.setErr(fmt.Errorf("detaching dc: %w", err))
+				return
+			}
+			openWait.setRWC(raw)
+		})
+	} else {
+		pc.OnDataChannel(func(remoteDC *webrtc.DataChannel) {
+			dc = remoteDC
+			remoteDC.OnOpen(func() {
+				raw, err := remoteDC.Detach()
+				if err != nil {
+					openWait.setErr(fmt.Errorf("detaching dc: %w", err))
+					return
+				}
+				openWait.setRWC(raw)
+			})
+		})
+	}
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		cfg.Logger.DebugContext(ctx, "peer connection state", slog.String("state", s.String()))
 		if s == webrtc.PeerConnectionStateFailed {
-			i2rWait.setErr(fmt.Errorf("peer connection failed"))
-			r2iWait.setErr(fmt.Errorf("peer connection failed"))
+			openWait.setErr(fmt.Errorf("peer connection failed"))
 		}
 	})
 
@@ -139,32 +131,18 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 		return nil, fmt.Errorf("opening session: %w", err)
 	}
 
-	i2rRaw, err := i2rWait.wait(ctx)
+	raw, err := openWait.wait(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("opening session: waiting for i2r open: %w", err)
-	}
-	r2iRaw, err := r2iWait.wait(ctx)
-	if err != nil {
-		_ = i2rRaw.Close()
-		return nil, fmt.Errorf("opening session: waiting for r2i open: %w", err)
-	}
-
-	var outDC *webrtc.DataChannel
-	var outRaw, inRaw io.ReadWriteCloser
-	if initiator {
-		outDC, outRaw, inRaw = i2rDC, i2rRaw, r2iRaw
-	} else {
-		outDC, outRaw, inRaw = r2iDC, r2iRaw, i2rRaw
+		return nil, fmt.Errorf("opening session: waiting for dc open: %w", err)
 	}
 
 	demuxCtx, demuxCancel := context.WithCancel(context.Background())
 	s := &Session{
 		cfg:         cfg,
 		pc:          pc,
-		outDC:       outDC,
-		outRaw:      outRaw,
-		outW:        wrapSendWriter(outDC, outRaw),
-		inRaw:       inRaw,
+		dc:          dc,
+		raw:         raw,
+		w:           wrapSendWriter(dc, raw),
 		sig:         sig,
 		key:         key,
 		inFrames:    make(chan dataFrame),
@@ -178,8 +156,7 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 }
 
 // exchangeSDP runs the offer/answer dance over sig. The encryption and
-// signaling-message format match the v1 Send/Recv path so a session-mode
-// peer is wire-compatible at the SDP layer.
+// signaling-message format match the v1 Send/Recv path.
 func exchangeSDP(ctx context.Context, pc *webrtc.PeerConnection, sig wire.MsgConn, key []byte, initiator bool) error {
 	if initiator {
 		offer, err := pc.CreateOffer(nil)
@@ -233,20 +210,15 @@ func exchangeSDP(ctx context.Context, pc *webrtc.PeerConnection, sig wire.MsgCon
 	return nil
 }
 
-// runDemux reads frames from the inbound DC, routing tagData / tagEOF to
+// runDemux reads frames from the data channel, routing tagData / tagEOF to
 // inFrames (consumed by Pull) and tagAck to cfg.OnRemoteProgress (fired
 // inline; callbacks must not block).
 //
-// Exits when the inbound reader returns any error — typically io.EOF when
-// the peer closes its outbound DC during Session.Close, or a transport
-// error when pc.Close tears the underlying SCTP transport down. The
-// terminal error is recorded on demuxErr; demuxDone is then closed.
-//
-// pion's stream.Close only resets the local OUTGOING half, so a local
-// inRaw.Close cannot unblock a pending Read on the same handle — only the
-// peer resetting its outgoing (their outRaw.Close) or pc.Close on either
-// side can. ctx is therefore unused inside the read loop; we rely on
-// Session.Close's coordinated teardown to make Read return.
+// Exits when the data channel returns any error. ctx is unused by the read
+// loop — pion's stream.Close only resets the local OUTGOING half, so the
+// pending Read can only be unblocked by the peer's reset (their close) or
+// by pc.Close. Session.Close coordinates the peer-driven path via
+// exchangeTeardown.
 func (s *Session) runDemux(ctx context.Context) {
 	defer close(s.demuxDone)
 	defer close(s.inFrames)
@@ -254,7 +226,7 @@ func (s *Session) runDemux(ctx context.Context) {
 
 	msg := make([]byte, maxFrameSize)
 	for {
-		n, err := s.inRaw.Read(msg)
+		n, err := s.raw.Read(msg)
 		if err != nil {
 			s.demuxErr = err
 			return
@@ -292,18 +264,16 @@ func (s *Session) runDemux(ctx context.Context) {
 // with tagData frames and terminated by tagEOF. Returns once the framing
 // terminator has been written. Acks for this transfer flow asynchronously
 // through cfg.OnRemoteProgress and may continue to arrive after Push
-// returns; callers should not interpret Push's return as "peer has fully
-// received" — only as "I have finished writing." Push is not safe to call
-// concurrently with itself; serialize per session.
+// returns. Not safe to call concurrently with itself.
 func (s *Session) Push(ctx context.Context, src io.Reader) error {
-	tw := &lockedTagWriter{w: s.outW, mu: &s.outMu}
+	tw := &lockedTagWriter{w: s.w, mu: &s.writeMu}
 	if _, err := io.Copy(tw, src); err != nil {
 		return fmt.Errorf("push: copying payload: %w", err)
 	}
 	if err := tw.Close(); err != nil {
 		return fmt.Errorf("push: writing eof: %w", err)
 	}
-	_ = ctx // currently unused; reserved for a future ack-bound completion.
+	_ = ctx
 	return nil
 }
 
@@ -317,8 +287,8 @@ func (s *Session) Push(ctx context.Context, src io.Reader) error {
 func (s *Session) Pull(ctx context.Context, dst io.Writer) error {
 	aw := &sessionAckingWriter{
 		dst:          dst,
-		raw:          s.outW,
-		mu:           &s.outMu,
+		raw:          s.w,
+		mu:           &s.writeMu,
 		ackThreshold: defaultAckThreshold,
 	}
 	for {
@@ -346,16 +316,8 @@ func (s *Session) Pull(ctx context.Context, dst io.Writer) error {
 }
 
 // Close tears down the session. Both peers must call Close — exchangeTeardown
-// is a synchronous handshake on the signaling channel, and the demuxer can
-// only exit once the peer also closes its outbound DC (pion's stream.Close
-// resets outgoing only; local Read can't be unblocked unilaterally). The
-// sequence:
-//
-//  1. exchangeTeardown — coordinate that both peers are about to close.
-//  2. Close outRaw — peer's inbound demuxer drains and exits.
-//  3. Wait for our demuxer to exit (peer's Close has reset their outbound,
-//     our inRaw read sees EOF). pc.Close is the safety net at end.
-//  4. Close pc.
+// is a synchronous handshake on the signaling channel. The data channel is
+// then closed bilaterally so both demuxers drain on EOF cleanly.
 //
 // Idempotent — second and later calls return the first error.
 func (s *Session) Close(ctx context.Context) error {
@@ -364,10 +326,7 @@ func (s *Session) Close(ctx context.Context) error {
 			s.cfg.Logger.DebugContext(ctx, "session teardown handshake", slog.String("err", err.Error()))
 			s.closeErr = fmt.Errorf("close: teardown: %w", err)
 		}
-		_ = s.outRaw.Close()
-		// Wait for the demuxer to exit on peer's reciprocal close. Bound
-		// the wait by ctx and by a 5s safety timer; pc.Close at the end
-		// will force any laggard read to return.
+		_ = s.raw.Close()
 		closeTimer := time.NewTimer(5 * time.Second)
 		defer closeTimer.Stop()
 		select {
@@ -387,23 +346,19 @@ func (s *Session) Close(ctx context.Context) error {
 }
 
 // lockedTagWriter is tagWriter with a mutex around each frame Write so it
-// shares the outbound DC safely with sessionAckingWriter, and chunks large
-// inputs so each underlying Write produces one DC message no larger than
-// maxPayloadPerFrame. v1's tagWriter never had to chunk because wire.Encrypt
-// upstream already produced bounded chunks; rtc.Session is plaintext at the
-// transport layer, so a caller passing a multi-MB slice (e.g. via
-// bytes.Reader.WriteTo) would otherwise produce a single oversize SCTP
-// message that blows past the receiver's read buffer.
+// shares the data channel safely with sessionAckingWriter, and chunks
+// large inputs so each underlying Write produces one DC message no larger
+// than maxPayloadPerFrame. v1's tagWriter never had to chunk because
+// wire.Encrypt upstream already produced bounded chunks; rtc.Session is
+// plaintext at the transport layer, so a caller passing a multi-MB slice
+// (e.g. via bytes.Reader.WriteTo) would otherwise produce a single
+// oversize SCTP message that blows past the receiver's read buffer.
 type lockedTagWriter struct {
 	w      io.Writer
 	mu     *sync.Mutex
 	closed bool
 }
 
-// maxPayloadPerFrame caps the application-layer bytes per tagData message.
-// Combined with the one-byte tag and SCTP overhead, the on-wire frame fits
-// well under both maxFrameSize (the receiver's buffer) and the 256 KiB
-// browser ceiling that wrapSendWriter targets in the JS build.
 const maxPayloadPerFrame = 64 * 1024
 
 func (t *lockedTagWriter) Write(p []byte) (int, error) {
@@ -445,7 +400,7 @@ func (t *lockedTagWriter) Close() error {
 }
 
 // sessionAckingWriter is ackingWriter with a mutex around each ack frame
-// Write so it shares the outbound DC safely with lockedTagWriter.
+// Write so it shares the data channel safely with lockedTagWriter.
 type sessionAckingWriter struct {
 	dst          io.Writer
 	raw          io.Writer

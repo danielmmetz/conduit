@@ -88,11 +88,7 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 			defer src.Close()
 			pr := newProgressLine(stderr, "↑")
 			defer pr.Done()
-			totalSize := src.Preamble.Size
-			onProgress := func(total int64) {
-				pr.Update(total, totalSize)
-			}
-			if err := client.Send(ctx, logger, server, policy, src.Preamble, src.Reader, func(code string) {
+			onCode := func(code string) {
 				fmt.Fprintf(out, "code: %s\n", code)
 				page, pageErr := receivePageURL(server, code)
 				if pageErr == nil {
@@ -105,9 +101,17 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 					}
 				}
 				fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
-			}, onProgress); err != nil {
+			}
+			sess, err := client.OpenSender(ctx, logger, server, policy, onCode, nil)
+			if err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
+			defer sess.Close(ctx)
+			pr.Update(0, src.Preamble.Size)
+			if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
+				return fmt.Errorf("running send: %w", err)
+			}
+			pr.Update(src.Preamble.Size, src.Preamble.Size)
 			fmt.Fprintln(out, "sent")
 			return nil
 		},
@@ -151,18 +155,37 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 			opts := xfer.SinkOptions{OutPath: sinkOutPath, Stdout: out}
 			pr := newProgressLine(stderr, "↓")
 			defer pr.Done()
+			done := make(chan error, 1)
 			open := func(pre wire.Preamble) (io.WriteCloser, error) {
 				sink, err := xfer.OpenSink(pre, opts)
 				if err != nil {
+					done <- err
 					return nil, err
 				}
 				totalSize := pre.Size
-				return &progressSink{w: sink, cb: func(received int64) { pr.Update(received, totalSize) }}, nil
+				return &finalizingSink{
+					w:  sink,
+					cb: func(received int64) { pr.Update(received, totalSize) },
+					onClose: func() error {
+						done <- nil
+						return nil
+					},
+				}, nil
 			}
-			if err := client.Recv(ctx, logger, server, code, policy, open); err != nil {
+			sess, err := client.OpenReceiver(ctx, logger, server, code, policy, open)
+			if err != nil {
 				return fmt.Errorf("running recv: %w", err)
 			}
-			return nil
+			defer sess.Close(ctx)
+			select {
+			case err := <-done:
+				if err != nil {
+					return fmt.Errorf("running recv: %w", err)
+				}
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		},
 	}
 }
@@ -345,3 +368,38 @@ func (p *progressSink) Write(b []byte) (int, error) {
 }
 
 func (p *progressSink) Close() error { return p.w.Close() }
+
+// finalizingSink wraps a writable sink with a progress callback and an
+// onClose hook fired after the sink's own Close. The receive command uses
+// this to learn when the first transfer's payload has been fully flushed
+// to disk so it can return out of its Wait-for-first-transfer loop.
+type finalizingSink struct {
+	w       io.WriteCloser
+	cb      func(int64)
+	onClose func() error
+	n       int64
+}
+
+func (p *finalizingSink) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	if n > 0 {
+		p.n += int64(n)
+		if p.cb != nil {
+			p.cb(p.n)
+		}
+	}
+	return n, err
+}
+
+func (p *finalizingSink) Close() error {
+	if err := p.w.Close(); err != nil {
+		if p.onClose != nil {
+			_ = p.onClose()
+		}
+		return err
+	}
+	if p.onClose != nil {
+		return p.onClose()
+	}
+	return nil
+}
