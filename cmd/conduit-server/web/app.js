@@ -259,13 +259,14 @@
   function wireUI(serviceWorkerDownloadOk) {
     const serverUrl = $("serverUrl");
     serverUrl.value = defaultServerUrl();
-    if (isDefaultOrigin()) {
+    // The Server field starts hidden via inline style in index.html so the
+    // common hosted case avoids a flash before this code runs. Reveal it
+    // (clearing the inline rule lets .field's display:flex take over) only
+    // when we can't reach the hosted default for the user.
+    if (!isDefaultOrigin()) {
       const field = serverUrl.closest("label.field");
       if (field) {
-        // .field sets display:flex, which has the same specificity as the
-        // UA's [hidden]{display:none} rule and wins by ordering — so the
-        // hidden attribute alone leaves the field visible. Force it.
-        field.style.display = "none";
+        field.style.display = "";
       }
     }
 
