@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -156,6 +157,7 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 			pr := newProgressLine(stderr, "↓")
 			defer pr.Done()
 			done := make(chan error, 1)
+			var writtenAnnounce string
 			open := func(pre wire.Preamble) (io.WriteCloser, error) {
 				sink, err := xfer.OpenSink(pre, opts)
 				if err != nil {
@@ -166,10 +168,12 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 				// progress line uses \r and would overwrite the payload
 				// the user is trying to read. Disk-bound transfers still
 				// get the progress meter and a final ✓.
+				toStdout := sinkWritesToStdout(pre, sinkOutPath)
 				var cb func(int64)
-				if !sinkWritesToStdout(pre, sinkOutPath) {
+				if !toStdout {
 					totalSize := pre.Size
 					cb = func(received int64) { pr.Update(received, totalSize) }
+					writtenAnnounce = sinkAnnounceName(pre, sinkOutPath)
 				}
 				return &finalizingSink{
 					w:  sink,
@@ -191,6 +195,9 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 					return fmt.Errorf("running recv: %w", err)
 				}
 				pr.Finish(" ✓")
+				if writtenAnnounce != "" {
+					fmt.Fprintf(out, "wrote %s\n", writtenAnnounce)
+				}
 				return nil
 			case <-ctx.Done():
 				return ctx.Err()
@@ -237,6 +244,28 @@ func sinkWritesToStdout(pre wire.Preamble, outPath string) bool {
 		return true
 	}
 	return false
+}
+
+// sinkAnnounceName returns a human-readable description of where a
+// successfully-received payload was written, for printing after the
+// transfer completes. Returns "" for stdout-bound sinks (the user already
+// sees the payload). Mirrors xfer.OpenSink's path resolution so the
+// announce stays consistent with where the bytes actually land.
+func sinkAnnounceName(pre wire.Preamble, outPath string) string {
+	if outPath != "" && outPath != xfer.StdoutMarker {
+		return outPath
+	}
+	if pre.Kind == wire.PreambleKindFile && pre.Name != "" && pre.Name != "stdin" {
+		return filepath.Base(pre.Name)
+	}
+	if pre.Kind == wire.PreambleKindTar {
+		// openTarSink extracts to opts.OutPath or CWD when unset.
+		if outPath != "" {
+			return outPath + "/"
+		}
+		return "./"
+	}
+	return ""
 }
 
 // recvCLIHint is the "conduit recv ..." command shown to the sender. The

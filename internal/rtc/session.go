@@ -96,6 +96,7 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 	var rawHolder atomicRWC
 	wireDC := func(d *webrtc.DataChannel) {
 		d.OnOpen(func() {
+			cfg.Logger.DebugContext(ctx, "dc onopen", slog.String("label", d.Label()))
 			raw, err := d.Detach()
 			if err != nil {
 				openWait.setErr(fmt.Errorf("detaching dc: %w", err))
@@ -112,6 +113,13 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 		// native build's stream.Close already gets unblocked by the
 		// peer's reflexive reset, so this is a no-op there.
 		d.OnClose(func() {
+			cfg.Logger.DebugContext(ctx, "dc onclose", slog.String("label", d.Label()))
+			if raw, ok := rawHolder.get(); ok {
+				_ = raw.Close()
+			}
+		})
+		d.OnError(func(err error) {
+			cfg.Logger.DebugContext(ctx, "dc onerror", slog.String("err", err.Error()))
 			if raw, ok := rawHolder.get(); ok {
 				_ = raw.Close()
 			}
@@ -132,8 +140,21 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 	}
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		cfg.Logger.DebugContext(ctx, "peer connection state", slog.String("state", s.String()))
-		if s == webrtc.PeerConnectionStateFailed {
+		switch s {
+		case webrtc.PeerConnectionStateFailed:
 			openWait.setErr(fmt.Errorf("peer connection failed"))
+			if raw, ok := rawHolder.get(); ok {
+				_ = raw.Close()
+			}
+		case webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateDisconnected:
+			// Force the local detached DC handle closed so the demuxer
+			// exits even if the data-channel layer's onclose event hasn't
+			// fired (or fires too late). The native build's own SCTP
+			// close path is unaffected because the handle is already
+			// closed by the time we get here in that scenario.
+			if raw, ok := rawHolder.get(); ok {
+				_ = raw.Close()
+			}
 		}
 	})
 
