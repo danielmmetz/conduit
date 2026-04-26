@@ -339,18 +339,24 @@
       transferList.hidden = false;
       const li = document.createElement("li");
       li.className = "transfer transfer-" + direction;
-      const arrow = direction === "out" ? "↑" : "↓";
-      const label = document.createElement("span");
-      label.className = "transfer-label";
-      label.textContent = `${arrow} ${name || "untitled"}`;
-      const meta = document.createElement("span");
-      meta.className = "transfer-meta";
-      meta.textContent = totalBytes != null ? formatBytes(totalBytes) : "";
-      li.appendChild(label);
-      li.appendChild(meta);
+      const icon = document.createElement("span");
+      icon.className = "transfer-icon";
+      icon.textContent = direction === "out" ? "↑" : "↓";
+      const nameEl = document.createElement("span");
+      nameEl.className = "transfer-name";
+      nameEl.textContent = name || "untitled";
+      const bytes = document.createElement("span");
+      bytes.className = "transfer-bytes";
+      bytes.textContent = totalBytes != null ? formatBytes(totalBytes) : "";
+      const status = document.createElement("span");
+      status.className = "transfer-status";
+      li.appendChild(icon);
+      li.appendChild(nameEl);
+      li.appendChild(bytes);
+      li.appendChild(status);
       transferList.appendChild(li);
       transferCount++;
-      return { li, label, meta };
+      return { li, name: nameEl, bytes, status };
     }
 
     function buildHostCodeData(server, code) {
@@ -362,13 +368,15 @@
     function onIncomingTransfer(preamble, bytesUA) {
       const bytes = new Uint8Array(bytesUA);
       const name = preamble.name || (preamble.kind === "text" ? "text" : "file");
-      const meta = appendTransfer("in", name, bytes.byteLength);
+      const row = appendTransfer("in", name, bytes.byteLength);
+      row.status.textContent = "received";
+      row.li.classList.add("ok");
       if (isTextPayload(preamble.kind, preamble.mime)) {
         const text = decodeUtf8(bytes);
         const pre = document.createElement("pre");
         pre.className = "transfer-text-body";
         pre.textContent = text;
-        meta.li.appendChild(pre);
+        row.li.appendChild(pre);
         const copy = document.createElement("button");
         copy.type = "button";
         copy.className = "copy-inline transfer-copy";
@@ -376,7 +384,7 @@
         copy.addEventListener("click", () => {
           copyWithFlash(copy, text, "Copy");
         });
-        meta.li.appendChild(copy);
+        row.li.appendChild(copy);
       } else {
         const type = preamble.mime || "application/octet-stream";
         const outName = preamble.name || "conduit-received.bin";
@@ -398,13 +406,14 @@
         dlBtn.className = "copy-inline transfer-copy";
         dlBtn.textContent = "Re-download";
         dlBtn.addEventListener("click", () => triggerBlobDownload(blob, outName));
-        meta.li.appendChild(dlBtn);
+        row.li.appendChild(dlBtn);
       }
     }
 
     function pushFile(file) {
       if (sessionId == null) return;
-      const meta = appendTransfer("out", file.name, file.size);
+      const row = appendTransfer("out", file.name, file.size);
+      row.status.textContent = "sending";
       file.arrayBuffer().then((ab) => {
         const buf = new Uint8Array(ab);
         const mime = file.type || "application/octet-stream";
@@ -415,12 +424,12 @@
           mime,
           (err) => {
             if (err != null && err !== undefined) {
-              meta.meta.textContent = String(err);
-              meta.li.classList.add("err");
+              row.status.textContent = String(err);
+              row.li.classList.add("err");
               return;
             }
-            meta.meta.textContent = formatBytes(file.size) + " · sent";
-            meta.li.classList.add("ok");
+            row.status.textContent = "sent";
+            row.li.classList.add("ok");
           }
         );
       });
@@ -429,15 +438,16 @@
     function pushText(text) {
       if (sessionId == null) return;
       const size = new TextEncoder().encode(text).length;
-      const meta = appendTransfer("out", "text", size);
+      const row = appendTransfer("out", "text", size);
+      row.status.textContent = "sending";
       globalThis.conduit.sessionPushText(sessionId, text, (err) => {
         if (err != null && err !== undefined) {
-          meta.meta.textContent = String(err);
-          meta.li.classList.add("err");
+          row.status.textContent = String(err);
+          row.li.classList.add("err");
           return;
         }
-        meta.meta.textContent = formatBytes(size) + " · sent";
-        meta.li.classList.add("ok");
+        row.status.textContent = "sent";
+        row.li.classList.add("ok");
       });
     }
 

@@ -4,6 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>conduit</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/style.css" />
     <script defer src="/wasm_exec.js"></script>
     <script defer src="/app.js"></script>
@@ -54,44 +60,43 @@
 
       <section class="panel" id="pairedPanel" hidden>
         <div id="hostCode" class="code-box" hidden>
-          <p class="label">Code</p>
+          <p class="card-title">Session</p>
           <code id="codeText"></code>
-          <div class="share-block-wrap">
-            <p class="label">Link</p>
-            <div class="copy-row">
-              <code id="shareBrowserUrl" class="share-code"></code>
-              <button type="button" class="copy-inline" id="copyBrowserUrlBtn">Copy</button>
-            </div>
+          <div class="copy-row">
+            <span class="label">Link</span>
+            <code id="shareBrowserUrl" class="share-code"></code>
+            <button type="button" class="copy-inline" id="copyBrowserUrlBtn">Copy</button>
           </div>
-          <div class="share-block-wrap">
-            <p class="label">CLI</p>
-            <div class="copy-row">
-              <code id="shareCliCmd" class="share-code"></code>
-              <button type="button" class="copy-inline" id="copyCliCmdBtn">Copy</button>
-            </div>
+          <div class="copy-row">
+            <span class="label">CLI</span>
+            <code id="shareCliCmd" class="share-code"></code>
+            <button type="button" class="copy-inline" id="copyCliCmdBtn">Copy</button>
           </div>
           <div id="qrHost"></div>
         </div>
 
-        <div
-          class="dropzone"
-          id="dropzone"
-          tabindex="0"
-          aria-label="Send a file"
-        >
-          <p>Drop or <button type="button" id="pickBtn">choose</button> a file to send</p>
-          <input type="file" id="fileInput" hidden />
+        <div class="send-grid">
+          <div
+            class="dropzone"
+            id="dropzone"
+            tabindex="0"
+            aria-label="Send a file"
+          >
+            <p>Drop a file</p>
+            <p>or <button type="button" id="pickBtn">click to choose</button></p>
+            <input type="file" id="fileInput" hidden />
+          </div>
+          <label class="paste-field">
+            <textarea
+              id="pasteTarget"
+              rows="2"
+              autocomplete="off"
+              spellcheck="true"
+              aria-label="Paste to send text"
+              placeholder="Paste text"
+            ></textarea>
+          </label>
         </div>
-        <label class="field paste-field">
-          <textarea
-            id="pasteTarget"
-            rows="3"
-            autocomplete="off"
-            spellcheck="true"
-            aria-label="Paste to send text"
-            placeholder="Paste text to send"
-          ></textarea>
-        </label>
 
         <ul id="transferList" class="transfer-list" hidden></ul>
 
