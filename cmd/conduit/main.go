@@ -67,11 +67,12 @@ func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out, stder
 func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text string
-	var showQR bool
+	var showQR, git bool
 	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&text, "text", "", "text payload to send instead of a file")
 	fs.BoolVar(&showQR, "qr", false, "after printing the code, render a QR of the browser URL for scanning from a phone")
+	fs.BoolVar(&git, "git", true, "for directory sends, honor a root .gitignore and skip .git/; --git=false sends the tree verbatim")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "send",
@@ -80,7 +81,7 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
-			src, err := openSource(text, args, stdin)
+			src, err := openSource(text, args, stdin, git)
 			if err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
@@ -168,7 +169,7 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 
 // openSource resolves the payload Source from --text, positional paths, or "-"
 // stdin. Exactly one route must apply; mixing --text with paths is an error.
-func openSource(text string, args []string, stdin io.Reader) (*xfer.Source, error) {
+func openSource(text string, args []string, stdin io.Reader, git bool) (*xfer.Source, error) {
 	if text != "" && len(args) > 0 {
 		return nil, fmt.Errorf("resolving send source: pass either --text or a path, not both")
 	}
@@ -178,7 +179,7 @@ func openSource(text string, args []string, stdin io.Reader) (*xfer.Source, erro
 	if len(args) == 0 {
 		return nil, fmt.Errorf("resolving send source: pass --text <message>, one or more paths, or '-' for stdin")
 	}
-	src, err := xfer.OpenPaths(args, stdin)
+	src, err := xfer.OpenPaths(args, stdin, git)
 	if err != nil {
 		return nil, fmt.Errorf("resolving send source: %w", err)
 	}

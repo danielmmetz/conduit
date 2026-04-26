@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/danielmmetz/conduit/internal/wire"
+	gitignore "github.com/sabhiram/go-gitignore"
 )
 
 // Source is a streamable payload paired with its preamble.
@@ -64,10 +65,14 @@ func OpenStdin(stdin io.Reader) *Source {
 //   - a single directory, or multiple paths (mixed files/dirs) → streaming
 //     tar Source with Size == -1.
 //
+// When git is true, directory walks honor a .gitignore at each directory's
+// root (sub-directory .gitignore files are not consulted in v1) and always
+// skip the .git/ subtree. When git is false, the directory is sent verbatim.
+//
 // Paths are opened lazily where possible: for the single-file case we open
 // and stat the file here so a missing path fails fast; for the tar case we
 // validate each path exists, then build a piped tar-producer goroutine.
-func OpenPaths(paths []string, stdin io.Reader) (*Source, error) {
+func OpenPaths(paths []string, stdin io.Reader, git bool) (*Source, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("resolving send source: no paths given")
 	}
@@ -105,7 +110,7 @@ func OpenPaths(paths []string, stdin io.Reader) (*Source, error) {
 			return nil, fmt.Errorf("stat %s: %w", p, err)
 		}
 	}
-	return newTarSource(paths)
+	return newTarSource(paths, git)
 }
 
 // newTarSource returns a Source whose Reader is the read end of an io.Pipe;
@@ -115,12 +120,12 @@ func OpenPaths(paths []string, stdin io.Reader) (*Source, error) {
 // The producer goroutine terminates on any of: tar.Writer.Close error,
 // successful finish, or the reader calling Close on the pipe read end
 // (which causes subsequent writes to return io.ErrClosedPipe).
-func newTarSource(paths []string) (*Source, error) {
+func newTarSource(paths []string, git bool) (*Source, error) {
 	pr, pw := io.Pipe()
 	go func() {
 		defer pw.Close()
 		tw := tar.NewWriter(pw)
-		err := writeTarPaths(tw, paths)
+		err := writeTarPaths(tw, paths, git)
 		if cerr := tw.Close(); err == nil {
 			err = cerr
 		}
@@ -141,7 +146,7 @@ func newTarSource(paths []string) (*Source, error) {
 	}, nil
 }
 
-func writeTarPaths(tw *tar.Writer, paths []string) error {
+func writeTarPaths(tw *tar.Writer, paths []string, git bool) error {
 	for _, p := range paths {
 		info, err := os.Lstat(p)
 		if err != nil {
@@ -150,6 +155,13 @@ func writeTarPaths(tw *tar.Writer, paths []string) error {
 		base := filepath.Base(p)
 		if info.IsDir() {
 			root := filepath.Clean(p)
+			var ig *gitignore.GitIgnore
+			if git {
+				// CompileIgnoreFile returns a non-nil error when .gitignore is missing
+				// or unreadable; treat both as "no patterns" and fall through to the
+				// always-skip-.git rule below.
+				ig, _ = gitignore.CompileIgnoreFile(filepath.Join(root, ".gitignore"))
+			}
 			err := filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
 				if err != nil {
 					return fmt.Errorf("walking %s: %w", path, err)
@@ -157,6 +169,17 @@ func writeTarPaths(tw *tar.Writer, paths []string) error {
 				rel, err := filepath.Rel(root, path)
 				if err != nil {
 					return fmt.Errorf("rel %s: %w", path, err)
+				}
+				if git && rel != "." {
+					if fi.IsDir() && fi.Name() == ".git" {
+						return filepath.SkipDir
+					}
+					if ig != nil && ig.MatchesPath(filepath.ToSlash(rel)) {
+						if fi.IsDir() {
+							return filepath.SkipDir
+						}
+						return nil
+					}
 				}
 				name := base
 				if rel != "." {

@@ -38,7 +38,7 @@ func TestOpenPathsSingleFile(t *testing.T) {
 	if err := os.WriteFile(path, payload, 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	s, err := xfer.OpenPaths([]string{path}, nil)
+	s, err := xfer.OpenPaths([]string{path}, nil, false)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestOpenPathsSingleFile(t *testing.T) {
 func TestOpenPathsStdin(t *testing.T) {
 	t.Parallel()
 	in := strings.NewReader("from stdin")
-	s, err := xfer.OpenPaths([]string{xfer.StdinMarker}, in)
+	s, err := xfer.OpenPaths([]string{xfer.StdinMarker}, in, false)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestOpenPathsDirectoryStreamsTar(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "a.txt"), "alpha")
 	mustWrite(t, filepath.Join(root, "nested", "b.txt"), "bravo")
 
-	s, err := xfer.OpenPaths([]string{root}, nil)
+	s, err := xfer.OpenPaths([]string{root}, nil, false)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestOpenPathsMultipleFilesStreamsTar(t *testing.T) {
 	mustWrite(t, p1, "1")
 	mustWrite(t, p2, "22")
 
-	s, err := xfer.OpenPaths([]string{p1, p2}, nil)
+	s, err := xfer.OpenPaths([]string{p1, p2}, nil, false)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -144,10 +144,51 @@ func TestOpenPathsStdinWithOtherPaths(t *testing.T) {
 	tmp := t.TempDir()
 	p := filepath.Join(tmp, "a.txt")
 	mustWrite(t, p, "x")
-	_, err := xfer.OpenPaths([]string{xfer.StdinMarker, p}, nil)
+	_, err := xfer.OpenPaths([]string{xfer.StdinMarker, p}, nil, false)
 	if err == nil {
 		t.Fatal("expected error when mixing stdin with other paths")
 	}
+}
+
+func TestOpenPathsDirectoryGitIgnoreSkipsPatterns(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, ".gitignore"), "node_modules\n*.log\n")
+	mustWrite(t, filepath.Join(root, "keep.txt"), "kept")
+	mustWrite(t, filepath.Join(root, "trace.log"), "should be skipped")
+	mustWrite(t, filepath.Join(root, "node_modules", "pkg", "index.js"), "skipped subtree")
+
+	out := extractDirSend(t, root, true)
+	base := filepath.Base(root)
+	checkFile(t, filepath.Join(out, base, "keep.txt"), "kept")
+	checkAbsent(t, filepath.Join(out, base, "trace.log"))
+	checkAbsent(t, filepath.Join(out, base, "node_modules"))
+}
+
+func TestOpenPathsDirectoryGitIgnoreSkipsGitDir(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "README"), "hello")
+	mustWrite(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main\n")
+	mustWrite(t, filepath.Join(root, ".git", "objects", "pack", "x.pack"), "binary")
+
+	out := extractDirSend(t, root, true)
+	base := filepath.Base(root)
+	checkFile(t, filepath.Join(out, base, "README"), "hello")
+	checkAbsent(t, filepath.Join(out, base, ".git"))
+}
+
+func TestOpenPathsDirectoryGitFalseSendsEverything(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, ".gitignore"), "skipped.txt\n")
+	mustWrite(t, filepath.Join(root, "skipped.txt"), "with --git=true this would be skipped")
+	mustWrite(t, filepath.Join(root, ".git", "HEAD"), "ref")
+
+	out := extractDirSend(t, root, false)
+	base := filepath.Base(root)
+	checkFile(t, filepath.Join(out, base, "skipped.txt"), "with --git=true this would be skipped")
+	checkFile(t, filepath.Join(out, base, ".git", "HEAD"), "ref")
 }
 
 func TestOpenSinkRejectsTarTraversal(t *testing.T) {
@@ -339,4 +380,35 @@ func checkFile(t *testing.T, path, want string) {
 	if string(got) != want {
 		t.Fatalf("%s = %q, want %q", path, got, want)
 	}
+}
+
+func checkAbsent(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("%s exists, want absent (stat err=%v)", path, err)
+	}
+}
+
+// extractDirSend runs OpenPaths on root, pipes the tar stream through OpenSink,
+// and returns the extraction directory. Used by gitignore tests to assert which
+// files survive the walk.
+func extractDirSend(t *testing.T, root string, git bool) string {
+	t.Helper()
+	s, err := xfer.OpenPaths([]string{root}, nil, git)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	out := t.TempDir()
+	sink, err := xfer.OpenSink(s.Preamble, xfer.SinkOptions{OutPath: out})
+	if err != nil {
+		t.Fatalf("open sink: %v", err)
+	}
+	if _, err := io.Copy(sink, s.Reader); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("close sink: %v", err)
+	}
+	return out
 }
