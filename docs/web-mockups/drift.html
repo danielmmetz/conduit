@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>conduit — drift</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0e1422;
+        --bg-soft: #131a2b;
+        --fg: #e8ecf3;
+        --muted: #8089a3;
+        --border: #1f2740;
+        --border-strong: #2a3454;
+        --panel: #161d31;
+        --inset: #0e1422;
+        --accent: #4fd1c5;
+        --accent-strong: #2dd4bf;
+        --accent-bg: rgba(45, 212, 191, 0.12);
+        --coral: #fb7185;
+        --warn: #fbbf24;
+        --ok: #4ade80;
+        --shadow: 0 1px 0 rgba(0,0,0,0.25), 0 8px 24px -10px rgba(0,0,0,0.5);
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f7f3ec;
+          --bg-soft: #fbf7f0;
+          --fg: #1c1917;
+          --muted: #78716c;
+          --border: #e7e1d6;
+          --border-strong: #d6cfbf;
+          --panel: #ffffff;
+          --inset: #f4efe5;
+          --accent: #0d9488;
+          --accent-strong: #0f766e;
+          --accent-bg: rgba(13, 148, 136, 0.08);
+          --coral: #e11d48;
+          --warn: #b45309;
+          --ok: #059669;
+          --shadow: 0 1px 0 rgba(0,0,0,0.02), 0 8px 28px -16px rgba(20,40,60,0.18);
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        font-feature-settings: 'cv11', 'ss01';
+        font-size: 13.5px;
+        line-height: 1.55;
+        letter-spacing: -0.005em;
+        min-height: 100vh;
+      }
+
+      .topbar {
+        background: var(--bg-soft);
+        border-bottom: 1px solid var(--border);
+        padding: 0.55rem 1.25rem;
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        font-size: 12.5px;
+      }
+      .topbar a { color: var(--muted); text-decoration: none; }
+      .topbar a:hover { color: var(--fg); }
+      .topbar .crumb { color: var(--fg); font-weight: 500; }
+      .topbar .sep { color: var(--border-strong); }
+      .topbar .pill {
+        margin-left: auto;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+
+      .header {
+        max-width: 38rem;
+        margin: 0 auto;
+        padding: 1.5rem 1.25rem 0.6rem;
+      }
+      .header h1 {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+      }
+      .header .desc {
+        margin: 0.15rem 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      main {
+        max-width: 38rem;
+        margin: 0 auto;
+        padding: 0.5rem 1.25rem 4rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.85rem;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 0.95rem 1rem;
+        box-shadow: var(--shadow);
+      }
+
+      .session-card {
+        display: flex;
+        flex-direction: column;
+        gap: 0.65rem;
+      }
+      .session-row1 {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .session-code {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
+        color: var(--fg);
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        padding: 3px 9px;
+        border-radius: 999px;
+      }
+      .pill.direct {
+        color: var(--accent-strong);
+        background: var(--accent-bg);
+      }
+      .pill .ind {
+        width: 6px; height: 6px; border-radius: 999px; background: currentColor;
+      }
+
+      .share-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.5rem;
+      }
+      @media (max-width: 540px) { .share-grid { grid-template-columns: 1fr; } }
+      .share-tile {
+        background: var(--inset);
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        padding: 0.5rem 0.65rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+      }
+      .share-tile .label {
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .share-tile .row {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+      .share-tile code {
+        flex: 1 1 auto;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11.5px;
+        color: var(--fg);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .share-tile .copy {
+        flex: 0 0 auto;
+        background: transparent;
+        border: 0;
+        color: var(--accent);
+        font: inherit;
+        font-size: 11.5px;
+        font-weight: 500;
+        cursor: pointer;
+        padding: 0;
+      }
+      .share-tile .copy:hover { color: var(--accent-strong); }
+
+      .send-card .head-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 0.55rem;
+      }
+      .send-card h2 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .send-card .hint {
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .dropzone {
+        border: 1.5px dashed var(--border-strong);
+        border-radius: 11px;
+        padding: 1rem;
+        text-align: center;
+        font-size: 13px;
+        color: var(--muted);
+        background: var(--inset);
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+      .dropzone:hover {
+        border-color: var(--accent);
+        background: var(--accent-bg);
+        color: var(--fg);
+      }
+      .dropzone .pick {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .paste {
+        margin-top: 0.5rem;
+        width: 100%;
+        background: var(--inset);
+        border: 1px solid var(--border-strong);
+        border-radius: 9px;
+        color: var(--fg);
+        font-family: inherit;
+        font-size: 13px;
+        padding: 0.55rem 0.7rem;
+        resize: vertical;
+        min-height: 2.5rem;
+      }
+      .paste:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-bg);
+      }
+      .paste::placeholder { color: var(--muted); }
+
+      .xfer {
+        display: grid;
+        grid-template-columns: 28px 1fr auto;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.5rem 0;
+      }
+      .xfer + .xfer { border-top: 1px solid var(--border); }
+      .xfer .icon {
+        width: 24px; height: 24px;
+        border-radius: 8px;
+        display: grid; place-items: center;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 13px;
+        font-weight: 600;
+        background: var(--accent-bg);
+        color: var(--accent);
+      }
+      .xfer.recv .icon {
+        background: rgba(251, 113, 133, 0.12);
+        color: var(--coral);
+      }
+      .xfer .name {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12.5px;
+        color: var(--fg);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .xfer .sub {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 1px;
+      }
+      .xfer .meta {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .xfer .progress {
+        grid-column: 2 / 4;
+        margin-top: 0.4rem;
+        height: 4px;
+        background: var(--inset);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .xfer .progress .bar {
+        height: 100%;
+        background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+        border-radius: 999px;
+      }
+
+      .footer-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .footer-row .left {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+      }
+      .footer-row .dot {
+        width: 7px; height: 7px;
+        border-radius: 999px;
+        background: var(--accent);
+      }
+      .end {
+        background: transparent;
+        border: 1px solid var(--border-strong);
+        color: var(--muted);
+        border-radius: 999px;
+        padding: 4px 12px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .end:hover { color: var(--coral); border-color: var(--coral); }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <a href="index.html">← mockups</a>
+      <span class="sep">/</span>
+      <span class="crumb">drift</span>
+      <span class="pill">03 · tailscale-warm</span>
+    </div>
+
+    <div class="header">
+      <h1>conduit</h1>
+      <p class="desc">Encrypted transfer · short code · zero accounts</p>
+    </div>
+
+    <main>
+      <div class="card session-card">
+        <div class="session-row1">
+          <span class="session-code">fern-loft-quartz</span>
+          <span class="pill direct"><span class="ind"></span>Direct</span>
+        </div>
+        <div class="share-grid">
+          <div class="share-tile">
+            <span class="label">Link</span>
+            <div class="row">
+              <code>conduit.example/#fern-loft-quartz</code>
+              <button class="copy">Copy</button>
+            </div>
+          </div>
+          <div class="share-tile">
+            <span class="label">CLI</span>
+            <div class="row">
+              <code>conduit recv fern-loft-quartz</code>
+              <button class="copy">Copy</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card send-card">
+        <div class="head-row">
+          <h2>Send something</h2>
+          <span class="hint">file or text · max 2 GB</span>
+        </div>
+        <div class="dropzone">
+          Drop a file here, or <span class="pick">choose one</span>
+        </div>
+        <textarea class="paste" placeholder="…or paste text to send"></textarea>
+      </div>
+
+      <div class="card">
+        <div class="head-row" style="margin-bottom: 0.4rem">
+          <h2>Transfers</h2>
+          <span class="hint">3 in this session</span>
+        </div>
+        <div class="xfer">
+          <div class="icon">↑</div>
+          <div>
+            <div class="name">design-notes.md</div>
+            <div class="sub">Sent · 3.2 KB</div>
+          </div>
+          <span class="meta">200 ms</span>
+        </div>
+        <div class="xfer">
+          <div class="icon">↑</div>
+          <div>
+            <div class="name">screenshot-2026-04-26.png</div>
+            <div class="sub">Sending · 263 / 412 KB</div>
+          </div>
+          <span class="meta">64%</span>
+          <div class="progress"><div class="bar" style="width: 64%"></div></div>
+        </div>
+        <div class="xfer recv">
+          <div class="icon">↓</div>
+          <div>
+            <div class="name">peer-reply.txt</div>
+            <div class="sub">Received · 1.1 KB</div>
+          </div>
+          <span class="meta">120 ms</span>
+        </div>
+      </div>
+
+      <div class="footer-row">
+        <span class="left"><span class="dot"></span>Direct WebRTC · paired 00:42</span>
+        <button class="end">End session</button>
+      </div>
+    </main>
+  </body>
+</html>

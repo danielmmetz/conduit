@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>conduit — geist</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #000;
+        --fg: #fff;
+        --muted: #888;
+        --dim: #444;
+        --border: #1a1a1a;
+        --border-strong: #333;
+        --inset: #0a0a0a;
+        --ok: #50e3c2;
+        --warn: #f5a623;
+        --err: #ff5a5f;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #fff;
+          --fg: #000;
+          --muted: #888;
+          --dim: #ccc;
+          --border: #eaeaea;
+          --border-strong: #d4d4d4;
+          --inset: #fafafa;
+          --ok: #0070f3;
+          --warn: #f5a623;
+          --err: #e00;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        font-feature-settings: 'cv11';
+        font-size: 13px;
+        line-height: 1.5;
+        letter-spacing: -0.011em;
+        min-height: 100vh;
+      }
+      .mono {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+      }
+
+      .topbar {
+        height: 48px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 1.5rem;
+        gap: 0.6rem;
+      }
+      .topbar a { color: var(--muted); text-decoration: none; font-size: 12.5px; }
+      .topbar a:hover { color: var(--fg); }
+      .topbar .sep { color: var(--dim); }
+      .topbar .crumb { font-weight: 500; color: var(--fg); font-size: 12.5px; }
+      .topbar .pill {
+        margin-left: auto;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+
+      .wrap {
+        max-width: 36rem;
+        margin: 0 auto;
+        padding: 2.5rem 1.5rem 5rem;
+      }
+
+      .head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        padding-bottom: 1.5rem;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 1.5rem;
+      }
+      .head h1 {
+        margin: 0;
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+      }
+      .head .desc {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+
+      .section {
+        padding: 0 0 1.5rem;
+      }
+      .section + .section {
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--border);
+      }
+      .section-label {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 0.7rem;
+      }
+      .section-label .label {
+        font-size: 11px;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+      }
+      .section-label .meta {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      .hero {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+      }
+      .hero code {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 28px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+      .hero .pill {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        font-weight: 500;
+        padding: 2px 8px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        border: 1px solid currentColor;
+      }
+      .hero .pill.direct { color: var(--ok); }
+      .hero .pill.relayed { color: var(--warn); }
+
+      .share-row {
+        display: grid;
+        grid-template-columns: 56px 1fr auto;
+        align-items: center;
+        gap: 0.8rem;
+        padding: 0.55rem 0;
+        border-top: 1px solid var(--border);
+      }
+      .share-row:first-of-type { border-top: 1px solid var(--border); }
+      .share-row .label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+      .share-row code {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12.5px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .share-row .copy {
+        background: transparent;
+        border: 0;
+        padding: 0;
+        color: var(--muted);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+      .share-row .copy:hover { color: var(--fg); }
+
+      .send-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.6rem;
+      }
+      @media (max-width: 540px) { .send-grid { grid-template-columns: 1fr; } }
+      .send-tile {
+        border: 1px solid var(--border);
+        padding: 1rem 0.85rem;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color 0.12s;
+      }
+      .send-tile:hover { border-color: var(--fg); }
+      .send-tile .tile-title {
+        font-size: 12.5px;
+        font-weight: 500;
+        margin: 0 0 0.15rem;
+      }
+      .send-tile .tile-sub {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin: 0;
+      }
+      .send-tile.drop { border-style: dashed; }
+
+      .xfer-row {
+        display: grid;
+        grid-template-columns: 16px 1fr auto;
+        align-items: center;
+        column-gap: 0.7rem;
+        padding: 0.6rem 0;
+        font-size: 13px;
+      }
+      .xfer-row + .xfer-row { border-top: 1px solid var(--border); }
+      .xfer-row .arrow {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12.5px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .xfer-row.ok .arrow { color: var(--ok); }
+      .xfer-row .name {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12.5px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .xfer-row .meta {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .xfer-row .progress {
+        grid-column: 1 / 4;
+        margin-top: 0.35rem;
+        height: 1px;
+        background: var(--border);
+      }
+      .xfer-row .progress .bar {
+        height: 1px;
+        background: var(--fg);
+      }
+
+      .footer-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-top: 1.5rem;
+        margin-top: 1rem;
+        border-top: 1px solid var(--border);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .footer-row .end {
+        background: transparent;
+        border: 0;
+        color: var(--muted);
+        font: inherit;
+        font-family: inherit;
+        font-size: 11.5px;
+        cursor: pointer;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+      .footer-row .end:hover { color: var(--err); }
+      .dot {
+        display: inline-block;
+        width: 6px; height: 6px;
+        border-radius: 999px;
+        background: var(--ok);
+        margin-right: 6px;
+        vertical-align: 1px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <a href="index.html">← mockups</a>
+      <span class="sep">/</span>
+      <span class="crumb">geist</span>
+      <span class="pill mono">02 · vercel-style</span>
+    </div>
+
+    <div class="wrap">
+      <div class="head">
+        <h1>conduit</h1>
+        <p class="desc">Encrypted transfer · short code</p>
+      </div>
+
+      <div class="section">
+        <div class="section-label">
+          <span class="label">Session</span>
+          <span class="meta">paired · 00:42</span>
+        </div>
+        <div class="hero">
+          <code>fern-loft-quartz</code>
+          <span class="pill direct">Direct</span>
+        </div>
+        <div style="margin-top: 1rem">
+          <div class="share-row">
+            <span class="label">Link</span>
+            <code>conduit.example/#fern-loft-quartz</code>
+            <button class="copy">Copy</button>
+          </div>
+          <div class="share-row">
+            <span class="label">CLI</span>
+            <code>conduit recv fern-loft-quartz</code>
+            <button class="copy">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-label">
+          <span class="label">Send</span>
+        </div>
+        <div class="send-grid">
+          <div class="send-tile drop">
+            <p class="tile-title">Drop a file</p>
+            <p class="tile-sub">or click to choose</p>
+          </div>
+          <div class="send-tile">
+            <p class="tile-title">Paste text</p>
+            <p class="tile-sub">⌘V to start</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-label">
+          <span class="label">Transfers</span>
+          <span class="meta">3 total</span>
+        </div>
+        <div class="xfer-row ok">
+          <span class="arrow">↑</span>
+          <span class="name">design-notes.md</span>
+          <span class="meta">3.2 KB</span>
+        </div>
+        <div class="xfer-row">
+          <span class="arrow">↑</span>
+          <span class="name">screenshot-2026-04-26.png</span>
+          <span class="meta">263 / 412 KB</span>
+          <div class="progress"><div class="bar" style="width: 64%"></div></div>
+        </div>
+        <div class="xfer-row ok">
+          <span class="arrow">↓</span>
+          <span class="name">peer-reply.txt</span>
+          <span class="meta">1.1 KB</span>
+        </div>
+      </div>
+
+      <div class="footer-row">
+        <span><span class="dot"></span>direct webrtc · sent 415 KB · received 1.1 KB</span>
+        <button class="end">End session</button>
+      </div>
+    </div>
+  </body>
+</html>

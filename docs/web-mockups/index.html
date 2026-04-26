@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>conduit — web mockups</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0a0a0a;
+        --fg: #ededed;
+        --muted: #8a8f98;
+        --border: #1f1f24;
+        --panel: #111114;
+        --accent: #a78bfa;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #fafafa;
+          --fg: #0a0a0a;
+          --muted: #5e6470;
+          --border: #e6e7eb;
+          --panel: #ffffff;
+          --accent: #6d28d9;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        font-feature-settings: 'cv11', 'ss01', 'ss03';
+        line-height: 1.5;
+        min-height: 100vh;
+      }
+      .wrap {
+        max-width: 56rem;
+        margin: 0 auto;
+        padding: 4rem 1.5rem 6rem;
+      }
+      h1 {
+        margin: 0 0 0.4rem;
+        font-size: 1.75rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+      .lede {
+        margin: 0 0 2.5rem;
+        color: var(--muted);
+        font-size: 0.95rem;
+        max-width: 38rem;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1rem;
+      }
+      @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+      .card {
+        display: block;
+        text-decoration: none;
+        color: inherit;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.1rem 1.2rem;
+        transition: border-color 0.12s, transform 0.12s;
+      }
+      .card:hover {
+        border-color: var(--accent);
+        transform: translateY(-1px);
+      }
+      .card h2 {
+        margin: 0 0 0.2rem;
+        font-size: 1.05rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .card .name {
+        color: var(--accent);
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 0.78rem;
+        text-transform: lowercase;
+      }
+      .card p {
+        margin: 0.5rem 0 0;
+        color: var(--muted);
+        font-size: 0.88rem;
+      }
+      .card ul {
+        margin: 0.6rem 0 0;
+        padding-left: 1.1rem;
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+      .card li { margin: 0.1rem 0; }
+      .meta {
+        margin-top: 3rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--border);
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+      code {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 0.82em;
+        padding: 0.05em 0.3em;
+        background: color-mix(in srgb, var(--fg) 8%, transparent);
+        border-radius: 3px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>conduit · web mockups</h1>
+      <p class="lede">
+        Four directions for the web client. All geometric sans, all denser than
+        today, all in the modern-SaaS minimalism family — with distinct
+        personalities. Each shows the paired session state (most surface area).
+      </p>
+
+      <div class="grid">
+        <a class="card" href="quill.html">
+          <div class="name">01 · quill</div>
+          <h2>Quiet hairlines</h2>
+          <p>Linear-style. Near-monochrome with a single restrained violet accent. 1px borders, no shadows, tight rhythm.</p>
+          <ul>
+            <li>Inter · 13.5px body</li>
+            <li>Indigo accent on hover/focus only</li>
+            <li>Mono codes, sans everything else</li>
+          </ul>
+        </a>
+
+        <a class="card" href="geist.html">
+          <div class="name">02 · geist</div>
+          <h2>Pure black &amp; white</h2>
+          <p>Vercel-style. Zero color in chrome — only state pills carry hue. Generous typographic hierarchy, big mono code as hero.</p>
+          <ul>
+            <li>Inter + JetBrains Mono</li>
+            <li>Borders or nothing — no fills</li>
+            <li>Code is the focal element</li>
+          </ul>
+        </a>
+
+        <a class="card" href="drift.html">
+          <div class="name">03 · drift</div>
+          <h2>Warm &amp; friendly</h2>
+          <p>Tailscale-style. Warm off-white / deep navy. Teal primary, coral for state. Softly rounded cards, very mild shadow.</p>
+          <ul>
+            <li>Cream &amp; navy palette</li>
+            <li>Teal action, coral status</li>
+            <li>14px rounded corners, light shadow</li>
+          </ul>
+        </a>
+
+        <a class="card" href="lume.html">
+          <div class="name">04 · lume</div>
+          <h2>Subtle premium</h2>
+          <p>Stripe-ish. Cool neutrals, a violet → blue gradient reserved for the primary action, layered hairline depth, careful type scale.</p>
+          <ul>
+            <li>Cool gray base</li>
+            <li>Single gradient accent, used sparingly</li>
+            <li>Two-step elevation via borders</li>
+          </ul>
+        </a>
+      </div>
+
+      <p class="meta">
+        Open <code>docs/web-mockups/index.html</code> in a browser. Each mock is
+        static — no JS, no WASM. Toggle OS dark/light to see both palettes.
+      </p>
+    </div>
+  </body>
+</html>

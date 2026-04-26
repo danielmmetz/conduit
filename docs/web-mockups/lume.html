@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>conduit — lume</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0b0d14;
+        --bg-grad: radial-gradient(1200px 600px at 50% -200px, #1a1d2e 0%, #0b0d14 60%);
+        --fg: #e8eaf2;
+        --muted: #7a7f95;
+        --border: #1d1f2c;
+        --border-strong: #2a2d3e;
+        --panel: #11131c;
+        --panel-2: #161824;
+        --inset: #0d0f17;
+        --accent: #8b5cf6;
+        --accent-2: #6366f1;
+        --accent-grad: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+        --ok: #34d399;
+        --warn: #fbbf24;
+        --err: #f87171;
+        --ring: 0 0 0 3px rgba(139, 92, 246, 0.18);
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f5f6fb;
+          --bg-grad: radial-gradient(1200px 600px at 50% -200px, #ecedf5 0%, #f5f6fb 60%);
+          --fg: #1a1d29;
+          --muted: #6b7185;
+          --border: #e6e8f0;
+          --border-strong: #d6d9e6;
+          --panel: #ffffff;
+          --panel-2: #fbfbfe;
+          --inset: #f3f4f9;
+          --accent: #6d28d9;
+          --accent-2: #4f46e5;
+          --ok: #059669;
+          --ring: 0 0 0 3px rgba(109, 40, 217, 0.14);
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; }
+      body {
+        background: var(--bg);
+        background-image: var(--bg-grad);
+        background-attachment: fixed;
+        color: var(--fg);
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        font-feature-settings: 'cv11', 'ss01';
+        font-size: 13.5px;
+        line-height: 1.55;
+        letter-spacing: -0.005em;
+        min-height: 100vh;
+      }
+
+      .topbar {
+        border-bottom: 1px solid var(--border);
+        padding: 0.55rem 1.25rem;
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        font-size: 12.5px;
+        backdrop-filter: blur(6px);
+      }
+      .topbar a { color: var(--muted); text-decoration: none; }
+      .topbar a:hover { color: var(--fg); }
+      .topbar .crumb {
+        color: var(--fg);
+        font-weight: 500;
+        background: linear-gradient(135deg, #8b5cf6, #6366f1);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .topbar .sep { color: var(--border-strong); }
+      .topbar .pill {
+        margin-left: auto;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+
+      .header {
+        max-width: 38rem;
+        margin: 0 auto;
+        padding: 2rem 1.25rem 0.75rem;
+      }
+      .header h1 {
+        margin: 0;
+        font-size: 26px;
+        font-weight: 700;
+        letter-spacing: -0.03em;
+      }
+      .header .desc {
+        margin: 0.2rem 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      main {
+        max-width: 38rem;
+        margin: 0 auto;
+        padding: 0.5rem 1.25rem 4rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0.85rem 0.95rem;
+        position: relative;
+      }
+      .card.elev {
+        background: var(--panel-2);
+        box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 12px 32px -16px rgba(0,0,0,0.4);
+      }
+      @media (prefers-color-scheme: light) {
+        .card.elev {
+          box-shadow: 0 1px 0 rgba(255,255,255,1) inset, 0 16px 36px -22px rgba(40,40,80,0.18);
+        }
+      }
+
+      .session {
+        display: flex;
+        flex-direction: column;
+        gap: 0.7rem;
+      }
+      .session-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .session-label {
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .session-code {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: -0.015em;
+        background: var(--accent-grad);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 10.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        padding: 3px 9px;
+        border-radius: 999px;
+        border: 1px solid currentColor;
+      }
+      .pill.direct { color: var(--ok); }
+      .pill.relayed { color: var(--warn); }
+      .pill .ind {
+        width: 5px; height: 5px; border-radius: 999px; background: currentColor;
+      }
+
+      .share-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+      }
+      .share-row {
+        display: grid;
+        grid-template-columns: 44px 1fr auto;
+        align-items: center;
+        gap: 0.55rem;
+        background: var(--inset);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.4rem 0.55rem;
+      }
+      .share-row .label {
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .share-row code {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11.5px;
+        color: var(--fg);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .share-row .copy {
+        background: transparent;
+        border: 1px solid var(--border-strong);
+        border-radius: 6px;
+        color: var(--muted);
+        font: inherit;
+        font-size: 11px;
+        padding: 2px 8px;
+        cursor: pointer;
+        transition: all 0.12s;
+      }
+      .share-row .copy:hover {
+        color: var(--fg);
+        border-color: var(--accent);
+      }
+
+      .send-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 0.55rem;
+      }
+      .send-head h2 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .send-head .hint {
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .dropzone {
+        position: relative;
+        border-radius: 10px;
+        padding: 1rem;
+        text-align: center;
+        font-size: 13px;
+        color: var(--muted);
+        background: var(--inset);
+        cursor: pointer;
+        border: 1px dashed var(--border-strong);
+        transition: all 0.15s;
+      }
+      .dropzone:hover {
+        border-color: var(--accent);
+        color: var(--fg);
+      }
+      .dropzone .pick {
+        font-weight: 600;
+        background: var(--accent-grad);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .paste {
+        margin-top: 0.5rem;
+        width: 100%;
+        background: var(--inset);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--fg);
+        font-family: inherit;
+        font-size: 13px;
+        padding: 0.55rem 0.7rem;
+        resize: vertical;
+        min-height: 2.4rem;
+      }
+      .paste:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: var(--ring);
+      }
+      .paste::placeholder { color: var(--muted); }
+
+      .xfer {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        column-gap: 0.7rem;
+        row-gap: 0.4rem;
+        padding: 0.55rem 0;
+        align-items: center;
+      }
+      .xfer + .xfer { border-top: 1px solid var(--border); }
+      .xfer .name-row {
+        display: flex; align-items: center; gap: 0.45rem;
+        min-width: 0;
+      }
+      .xfer .arrow {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--accent);
+      }
+      .xfer.recv .arrow { color: var(--accent-2); }
+      .xfer .name {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12.5px;
+        color: var(--fg);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .xfer .meta {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11.5px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .xfer .progress {
+        grid-column: 1 / 3;
+        height: 3px;
+        background: var(--inset);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .xfer .progress .bar {
+        height: 100%;
+        background: var(--accent-grad);
+        border-radius: 999px;
+      }
+      .xfer .sub {
+        grid-column: 1 / 3;
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      .footer-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12px;
+        color: var(--muted);
+        padding: 0 0.25rem;
+      }
+      .footer-row .left {
+        display: inline-flex; align-items: center; gap: 0.45rem;
+      }
+      .footer-row .dot {
+        width: 7px; height: 7px;
+        border-radius: 999px;
+        background: var(--ok);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent);
+      }
+      .end {
+        background: transparent;
+        border: 1px solid var(--border-strong);
+        color: var(--muted);
+        border-radius: 6px;
+        padding: 4px 11px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        transition: all 0.12s;
+      }
+      .end:hover { color: var(--err); border-color: var(--err); }
+
+      .primary-cta {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: var(--accent-grad);
+        color: white;
+        border: 0;
+        border-radius: 7px;
+        padding: 6px 14px;
+        font: inherit;
+        font-size: 12.5px;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 6px 16px -8px rgba(99,102,241,0.55);
+      }
+      .primary-cta:hover { filter: brightness(1.07); }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <a href="index.html">← mockups</a>
+      <span class="sep">/</span>
+      <span class="crumb">lume</span>
+      <span class="pill">04 · stripe-ish</span>
+    </div>
+
+    <div class="header">
+      <h1>conduit</h1>
+      <p class="desc">Encrypted transfer · short code · no accounts, no servers</p>
+    </div>
+
+    <main>
+      <div class="card elev session">
+        <div class="session-top">
+          <div>
+            <div class="session-label">Session code</div>
+            <div class="session-code">fern-loft-quartz</div>
+          </div>
+          <span class="pill direct"><span class="ind"></span>Direct</span>
+        </div>
+        <div class="share-stack">
+          <div class="share-row">
+            <span class="label">Link</span>
+            <code>conduit.example/#fern-loft-quartz</code>
+            <button class="copy">Copy</button>
+          </div>
+          <div class="share-row">
+            <span class="label">CLI</span>
+            <code>conduit recv fern-loft-quartz</code>
+            <button class="copy">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="send-head">
+          <h2>Send</h2>
+          <span class="hint">file or text</span>
+        </div>
+        <div class="dropzone">
+          Drop a file here, or <span class="pick">browse</span>
+        </div>
+        <textarea class="paste" placeholder="…or paste text to send"></textarea>
+      </div>
+
+      <div class="card">
+        <div class="send-head" style="margin-bottom: 0.2rem">
+          <h2>Transfers</h2>
+          <span class="hint">3 · 416 KB total</span>
+        </div>
+        <div class="xfer">
+          <div class="name-row">
+            <span class="arrow">↑</span>
+            <span class="name">design-notes.md</span>
+          </div>
+          <span class="meta">3.2 KB</span>
+          <span class="sub">Sent · 200 ms</span>
+        </div>
+        <div class="xfer">
+          <div class="name-row">
+            <span class="arrow">↑</span>
+            <span class="name">screenshot-2026-04-26.png</span>
+          </div>
+          <span class="meta">263 / 412 KB</span>
+          <div class="progress"><div class="bar" style="width: 64%"></div></div>
+          <span class="sub">Sending · 64%</span>
+        </div>
+        <div class="xfer recv">
+          <div class="name-row">
+            <span class="arrow">↓</span>
+            <span class="name">peer-reply.txt</span>
+          </div>
+          <span class="meta">1.1 KB</span>
+          <span class="sub">Received · 120 ms</span>
+        </div>
+      </div>
+
+      <div class="footer-row">
+        <span class="left"><span class="dot"></span>Direct WebRTC · 00:42</span>
+        <button class="end">End session</button>
+      </div>
+    </main>
+  </body>
+</html>
