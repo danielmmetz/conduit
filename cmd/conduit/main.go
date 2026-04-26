@@ -112,8 +112,7 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 				return fmt.Errorf("running send: %w", err)
 			}
 			pr.Update(src.Preamble.Size, src.Preamble.Size)
-			pr.Done()
-			fmt.Fprintln(out, "sent")
+			pr.Finish(" ✓")
 			return nil
 		},
 	}
@@ -163,10 +162,18 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 					done <- err
 					return nil, err
 				}
-				totalSize := pre.Size
+				// Skip progress when the sink writes to stdout — the
+				// progress line uses \r and would overwrite the payload
+				// the user is trying to read. Disk-bound transfers still
+				// get the progress meter and a final ✓.
+				var cb func(int64)
+				if !sinkWritesToStdout(pre, sinkOutPath) {
+					totalSize := pre.Size
+					cb = func(received int64) { pr.Update(received, totalSize) }
+				}
 				return &finalizingSink{
 					w:  sink,
-					cb: func(received int64) { pr.Update(received, totalSize) },
+					cb: cb,
 					onClose: func() error {
 						done <- nil
 						return nil
@@ -183,6 +190,7 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 				if err != nil {
 					return fmt.Errorf("running recv: %w", err)
 				}
+				pr.Finish(" ✓")
 				return nil
 			case <-ctx.Done():
 				return ctx.Err()
@@ -208,6 +216,27 @@ func openSource(text string, args []string, stdin io.Reader, git bool) (*xfer.So
 		return nil, fmt.Errorf("resolving send source: %w", err)
 	}
 	return src, nil
+}
+
+// sinkWritesToStdout reports whether xfer.OpenSink will route this
+// preamble + outPath combination to stdout, mirroring the same logic in
+// internal/xfer/sink.go. The recv command uses this to suppress the
+// progress meter for cases where its carriage-return output would
+// overwrite the payload the user is trying to read.
+func sinkWritesToStdout(pre wire.Preamble, outPath string) bool {
+	if outPath == xfer.StdoutMarker {
+		return true
+	}
+	if outPath != "" {
+		return false
+	}
+	if pre.Kind == wire.PreambleKindText {
+		return true
+	}
+	if pre.Kind == wire.PreambleKindFile && (pre.Name == "" || pre.Name == "stdin") {
+		return true
+	}
+	return false
 }
 
 // recvCLIHint is the "conduit recv ..." command shown to the sender. The
@@ -312,6 +341,19 @@ func (p *progressLine) Done() {
 	}
 	p.done = true
 	_, _ = fmt.Fprint(p.w, "\n")
+}
+
+// Finish emits suffix (typically " ✓") at the end of the most recent
+// progress line, then a newline. Idempotent. Used to mark the transfer
+// complete in-place instead of letting the bare progress line dangle.
+func (p *progressLine) Finish(suffix string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.done || !p.any {
+		return
+	}
+	p.done = true
+	_, _ = fmt.Fprint(p.w, suffix+"\n")
 }
 
 func (p *progressLine) formatLine(done, total int64) string {

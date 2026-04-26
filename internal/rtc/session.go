@@ -363,11 +363,14 @@ func (s *Session) Close(ctx context.Context) error {
 	return s.closeErr
 }
 
-// teardownTimeout bounds exchangeTeardown during Close. Long enough that a
-// cooperating peer almost always responds within it; short enough that a
-// session-mode peer (which deliberately stays open between transfers)
-// doesn't make the local side feel hung.
-const teardownTimeout = 2 * time.Second
+// teardownTimeout bounds exchangeTeardown during Close. Cooperating peers
+// respond in low double-digit milliseconds, so 500ms is long enough for
+// the common case yet short enough that a session-mode peer (which
+// deliberately stays open between transfers) doesn't add a perceptible
+// pause to the local Close. After the timeout the SCTP reset from
+// raw.Close still propagates and the peer's data channel surfaces a
+// close event within a few additional milliseconds.
+const teardownTimeout = 500 * time.Millisecond
 
 // atomicRWC is a one-set io.ReadWriteCloser slot, safe to set from
 // OnOpen and read from OnClose without ordering assumptions about which
