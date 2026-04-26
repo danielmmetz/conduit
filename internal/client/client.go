@@ -72,7 +72,9 @@ type SinkOpener func(wire.Preamble) (io.WriteCloser, error)
 // the payload so the receiver can pick a sink (single file / tar extractor /
 // stdout) without the server or TURN relay ever observing filenames or sizes.
 // onProgress, if non-nil, is called each time the peer acknowledges additional
-// plaintext bytes; treat the argument as a cumulative total (best-effort).
+// payload bytes; treat the argument as a cumulative payload-byte total
+// (best-effort). The preamble overhead is subtracted before invoking the
+// callback so the value matches preamble.Size for known-size payloads.
 func Send(ctx context.Context, logger *slog.Logger, server string, policy RelayPolicy, preamble wire.Preamble, src io.Reader, onCode func(code string), onProgress func(int64)) error {
 	wsURL, err := wsURLFor(server)
 	if err != nil {
@@ -129,15 +131,27 @@ func Send(ctx context.Context, logger *slog.Logger, server string, policy RelayP
 	if policy == RelayNone {
 		ice = nil
 	}
+	var preambleBuf bytes.Buffer
+	if err := wire.WritePreamble(&preambleBuf, preamble); err != nil {
+		return fmt.Errorf("framing preamble: %w", err)
+	}
+	// rtc.OnRemoteProgress reports cumulative plaintext bytes acked by the
+	// peer, which includes the preamble framing. Callers care about the
+	// payload count (matches preamble.Size), so strip the preamble overhead
+	// before invoking onProgress and clamp to zero for early acks that land
+	// inside the preamble window.
+	preambleBytes := int64(preambleBuf.Len())
+	wrappedProgress := onProgress
+	if onProgress != nil {
+		wrappedProgress = func(total int64) {
+			onProgress(max(total-preambleBytes, 0))
+		}
+	}
 	cfg := rtc.Config{
 		ICEServers:       ice,
 		TransportPolicy:  policy.transportPolicy(),
 		Logger:           logger,
-		OnRemoteProgress: onProgress,
-	}
-	var preambleBuf bytes.Buffer
-	if err := wire.WritePreamble(&preambleBuf, preamble); err != nil {
-		return fmt.Errorf("framing preamble: %w", err)
+		OnRemoteProgress: wrappedProgress,
 	}
 	combined := io.MultiReader(&preambleBuf, src)
 	if err := rtc.Send(ctx, wsMsgConn{conn: conn}, key, cfg, combined); err != nil {
