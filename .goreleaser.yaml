@@ -73,7 +73,7 @@ archives:
           - zip
     files:
       - README.md
-      - PLAN.md
+      - docs/PLAN.md
       - LICENSE*
       - deploy/*
 

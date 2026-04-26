@@ -120,4 +120,4 @@ Rate limits and the global concurrent-slot cap are tunable via `-reserve-per-min
   stdin → stdout, with receiver→sender progress acks inside the encrypted stream
 - **CLI** (`conduit`) and **browser** (Go→WASM + static JS) clients
 
-See `PLAN.md` for design notes and the full roadmap.
+See `docs/PLAN.md` for design notes and the full roadmap.
