@@ -32,12 +32,13 @@ func main() {
 // manual Add/Done. The browser runtime does not stop the WASM module, so
 // nothing calls Wait.
 type wasmBridge struct {
-	logger *slog.Logger
-	ops    sync.WaitGroup
+	logger   *slog.Logger
+	ops      sync.WaitGroup
+	sessions *sessionRegistry
 }
 
 func newWasmBridge(logger *slog.Logger) *wasmBridge {
-	return &wasmBridge{logger: logger}
+	return &wasmBridge{logger: logger, sessions: newSessionRegistry()}
 }
 
 func (b *wasmBridge) register(ctx context.Context) {
@@ -54,6 +55,7 @@ func (b *wasmBridge) register(ctx context.Context) {
 	exports.Set("qr", js.FuncOf(func(_ js.Value, args []js.Value) any {
 		return qrJS(args)
 	}))
+	b.registerSession(ctx, exports)
 	js.Global().Set("conduit", exports)
 }
 
