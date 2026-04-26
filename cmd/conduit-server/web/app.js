@@ -34,6 +34,42 @@
     barEl.style.width = (p * 100).toFixed(2) + "%";
   }
 
+  // formatBytes renders a binary-prefixed byte count using KB/MB/GB labels —
+  // matches the CLI's humanBytes so both surfaces read the same.
+  function formatBytes(n) {
+    if (n == null || n < 0) {
+      return "";
+    }
+    const unit = 1024;
+    if (n < unit) {
+      return n + " B";
+    }
+    const units = ["KB", "MB", "GB", "TB", "PB"];
+    let div = unit;
+    let exp = 0;
+    while (n / div >= unit && exp < units.length - 1) {
+      div *= unit;
+      exp++;
+    }
+    return (n / div).toFixed(1) + " " + units[exp];
+  }
+
+  // throttledProgress returns a wrapper that calls fn at most once per minMs,
+  // except the first call always fires and any call where done >= total (a
+  // final-progress update) bypasses the throttle so the user sees the 100% tick.
+  function throttledProgress(fn, minMs) {
+    let last = 0;
+    return (done, total) => {
+      const now = performance.now();
+      const final = total > 0 && done >= total;
+      if (!final && last !== 0 && now - last < minMs) {
+        return;
+      }
+      last = now;
+      fn(done, total);
+    };
+  }
+
   function isTextPayload(kind, mime) {
     if (kind === "text") {
       return true;
@@ -342,6 +378,14 @@
     });
 
     function sendCallbacks(server) {
+      const onProgress = throttledProgress((done, total) => {
+        if (total > 0) {
+          setBar(sendBar, done / total);
+          setStatus(sendStatus, "↑ " + formatBytes(done) + " / " + formatBytes(total), null);
+        } else {
+          setStatus(sendStatus, "↑ " + formatBytes(done), null);
+        }
+      }, 100);
       return {
         onCode(code) {
           codeText.textContent = code;
@@ -351,11 +395,7 @@
           shareCliCmd.textContent = recvCliCommand(server, code);
           renderQR(qrHost, link);
         },
-        onProgress(done, total) {
-          if (total > 0) {
-            setBar(sendBar, done / total);
-          }
-        },
+        onProgress,
         onDone(err) {
           sendProgress.hidden = true;
           if (err != null && err !== undefined) {
@@ -398,7 +438,7 @@
       sendCode.hidden = true;
       sendProgress.hidden = false;
       setBar(sendBar, 0);
-      sendFileName.textContent = "Text · " + text.length;
+      sendFileName.textContent = "Text · " + formatBytes(text.length);
       setStatus(sendStatus, "Connecting", null);
 
       const cb = sendCallbacks(server);
@@ -431,14 +471,20 @@
       setBar(recvBar, 0);
       setStatus(recvStatus, "Connecting", null);
 
+      const onRecvProgress = throttledProgress((received, total) => {
+        recvProgress.classList.remove("indet");
+        if (total > 0) {
+          setBar(recvBar, received / total);
+          setStatus(recvStatus, "↓ " + formatBytes(received) + " / " + formatBytes(total), null);
+        } else {
+          setBar(recvBar, 1);
+          setStatus(recvStatus, "↓ " + formatBytes(received), null);
+        }
+      }, 100);
       globalThis.conduit.recv(
         server,
         code,
-        function onProgress(n) {
-          recvProgress.classList.remove("indet");
-          setBar(recvBar, 1);
-          setStatus(recvStatus, "↓ " + n + " B", null);
-        },
+        onRecvProgress,
         function onDone(err, data, filename, kind, mime) {
           recvProgress.hidden = true;
           recvProgress.classList.remove("indet");
@@ -452,13 +498,13 @@
             recvTextBody.textContent = text;
             recvTextLabel.textContent = filename || "Text";
             recvText.hidden = false;
-            setStatus(recvStatus, "Done · " + bytes.length, "ok");
+            setStatus(recvStatus, "Done · " + formatBytes(bytes.length), "ok");
             return;
           }
           const type = mime || "application/octet-stream";
           const blob = new Blob([bytes], { type });
           const outName = filename || "conduit-received.bin";
-          setStatus(recvStatus, "Done · " + bytes.length, "ok");
+          setStatus(recvStatus, "Done · " + formatBytes(bytes.length), "ok");
 
           const useSw =
             serviceWorkerDownloadOk && navigator.serviceWorker.controller;

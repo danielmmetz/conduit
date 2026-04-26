@@ -14,7 +14,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/danielmmetz/conduit/internal/client"
 	"github.com/danielmmetz/conduit/internal/wire"
@@ -32,7 +34,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if err := mainE(ctx, logger, os.Stdin, os.Stdout, os.Args[1:]); err != nil {
+	if err := mainE(ctx, logger, os.Stdin, os.Stdout, os.Stderr, os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) || errors.Is(err, context.Canceled) {
 			if ctx.Err() == nil {
 				os.Exit(2)
@@ -46,21 +48,21 @@ func main() {
 	}
 }
 
-func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out io.Writer, args []string) error {
+func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out, stderr io.Writer, args []string) error {
 	root := ffcli.Command{
 		Name:       "conduit",
 		ShortUsage: "conduit <send|recv> [flags] ...",
 		ShortHelp:  "Share text or files between two devices over a rendezvous server.",
 		Subcommands: []*ffcli.Command{
-			sendCmd(logger, stdin, out),
-			recvCmd(logger, out),
+			sendCmd(logger, stdin, out, stderr),
+			recvCmd(logger, out, stderr),
 		},
 		Exec: func(context.Context, []string) error { return flag.ErrHelp },
 	}
 	return root.ParseAndRun(ctx, args)
 }
 
-func sendCmd(logger *slog.Logger, stdin io.Reader, out io.Writer) *ffcli.Command {
+func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text string
 	var noRelay, forceRelay bool
@@ -84,8 +86,11 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out io.Writer) *ffcli.Command
 				return fmt.Errorf("running send: %w", err)
 			}
 			defer src.Close()
+			pr := newProgressLine(stderr, "↑")
+			defer pr.Done()
+			totalSize := src.Preamble.Size
 			onProgress := func(total int64) {
-				logger.Debug("peer acked bytes", slog.Int64("total", total))
+				pr.Update(total, totalSize)
 			}
 			if err := client.Send(ctx, logger, server, policy, src.Preamble, src.Reader, func(code string) {
 				fmt.Fprintf(out, "code: %s\n", code)
@@ -103,7 +108,7 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out io.Writer) *ffcli.Command
 	}
 }
 
-func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
+func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit recv", flag.ContinueOnError)
 	var server, outPath string
 	var noRelay, forceRelay bool
@@ -143,8 +148,15 @@ func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 				return fmt.Errorf("usage: conduit recv <code> [-]")
 			}
 			opts := xfer.SinkOptions{OutPath: sinkOutPath, Stdout: out}
+			pr := newProgressLine(stderr, "↓")
+			defer pr.Done()
 			open := func(pre wire.Preamble) (io.WriteCloser, error) {
-				return xfer.OpenSink(pre, opts)
+				sink, err := xfer.OpenSink(pre, opts)
+				if err != nil {
+					return nil, err
+				}
+				totalSize := pre.Size
+				return &progressSink{w: sink, cb: func(received int64) { pr.Update(received, totalSize) }}, nil
 			}
 			if err := client.Recv(ctx, logger, server, code, policy, open); err != nil {
 				return fmt.Errorf("running recv: %w", err)
@@ -192,3 +204,108 @@ func receivePageURL(server, code string) (string, error) {
 	u.Fragment = code
 	return u.String(), nil
 }
+
+// progressLine renders single-line transfer progress to w using a carriage
+// return so successive updates overwrite the previous line. Updates are
+// throttled so a fast in-memory transfer doesn't flood the terminal.
+type progressLine struct {
+	w        io.Writer
+	prefix   string
+	mu       sync.Mutex
+	last     time.Time
+	maxWidth int
+	any      bool
+}
+
+const progressMinInterval = 100 * time.Millisecond
+
+func newProgressLine(w io.Writer, prefix string) *progressLine {
+	return &progressLine{w: w, prefix: prefix}
+}
+
+func (p *progressLine) Update(done, total int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	// Always emit when the transfer reaches its known total so the user sees a
+	// final 100% line; the throttle would otherwise suppress an ack that lands
+	// in the same window as the prior update.
+	final := total > 0 && done >= total
+	if !final && p.any && now.Sub(p.last) < progressMinInterval {
+		return
+	}
+	p.last = now
+	p.any = true
+	p.write(p.formatLine(done, total))
+}
+
+// Done emits a final line and a trailing newline so subsequent output starts
+// on a fresh line. Safe to call when no Update was issued.
+func (p *progressLine) Done() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.any {
+		return
+	}
+	if _, err := fmt.Fprint(p.w, "\n"); err != nil {
+		return
+	}
+}
+
+func (p *progressLine) formatLine(done, total int64) string {
+	if total > 0 {
+		pct := float64(done) / float64(total) * 100
+		return fmt.Sprintf("%s %s / %s (%.0f%%)", p.prefix, humanBytes(done), humanBytes(total), pct)
+	}
+	return fmt.Sprintf("%s %s", p.prefix, humanBytes(done))
+}
+
+func (p *progressLine) write(line string) {
+	if len(line) > p.maxWidth {
+		p.maxWidth = len(line)
+	}
+	pad := p.maxWidth - len(line)
+	padding := ""
+	if pad > 0 {
+		padding = fmt.Sprintf("%*s", pad, "")
+	}
+	_, _ = fmt.Fprintf(p.w, "\r%s%s", line, padding)
+}
+
+// humanBytes formats n as a binary-prefixed byte count using KB/MB/GB labels.
+// Mirrors the formatting used by the browser UI so CLI and web read the same.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	units := []string{"KB", "MB", "GB", "TB", "PB"}
+	for nn := n / unit; nn >= unit && exp < len(units)-1; nn /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), units[exp])
+}
+
+// progressSink wraps an io.WriteCloser, invoking cb with the cumulative byte
+// count after each successful Write so the receive command can render
+// progressive progress without changing the rtc / client signatures.
+type progressSink struct {
+	w  io.WriteCloser
+	cb func(int64)
+	n  int64
+}
+
+func (p *progressSink) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	if n > 0 {
+		p.n += int64(n)
+		if p.cb != nil {
+			p.cb(p.n)
+		}
+	}
+	return n, err
+}
+
+func (p *progressSink) Close() error { return p.w.Close() }

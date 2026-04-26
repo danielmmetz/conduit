@@ -190,7 +190,9 @@ func (b *wasmBridge) runSendText(ctx context.Context, server, text string, onCod
 }
 
 // recvJS(server, code, onProgress, onDone)
-// onProgress(bytesReceived) is invoked as payload arrives;
+// onProgress(bytesReceived, totalBytes) is invoked as payload arrives; total is
+// the preamble-advertised payload size, or -1 for streaming sources (stdin/tar)
+// where the size is not known up front.
 // onDone(err, data, filename, kind, mime) where data is a Uint8Array of the
 // payload, filename is the name advertised in the preamble (empty for text
 // shapes), kind is the preamble kind ("file"/"tar"/"text") and mime is the
@@ -225,10 +227,11 @@ func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProg
 		return
 	}
 	var buf bytes.Buffer
+	var totalSize int64 = -1
 	pw := &progressWriter{
 		dst: &buf,
-		cb: func(total int64) {
-			safeInvoke(onProgress, total)
+		cb: func(received int64) {
+			safeInvoke(onProgress, received, totalSize)
 		},
 	}
 	var filename, kind, mimeType string
@@ -236,6 +239,7 @@ func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProg
 		filename = pre.Name
 		kind = pre.Kind
 		mimeType = pre.MIME
+		totalSize = pre.Size
 		if pre.Kind == wire.PreambleKindTar {
 			// Browser has nowhere to place extracted files; surface the tar
 			// bytes as a single blob so the user can save it locally.
