@@ -93,31 +93,41 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 	}()
 
 	openWait := newDatachanWait()
+	var rawHolder atomicRWC
+	wireDC := func(d *webrtc.DataChannel) {
+		d.OnOpen(func() {
+			raw, err := d.Detach()
+			if err != nil {
+				openWait.setErr(fmt.Errorf("detaching dc: %w", err))
+				return
+			}
+			rawHolder.set(raw)
+			openWait.setRWC(raw)
+		})
+		// pion's wasm/JS detached data channel does not unblock its
+		// blocked Read when the underlying RTCDataChannel fires onclose
+		// (it only wires OnMessage). Without this hook the demuxer hangs
+		// forever after the peer closes; closing the detached handle on
+		// our side closes the channel that drives Read's select. The
+		// native build's stream.Close already gets unblocked by the
+		// peer's reflexive reset, so this is a no-op there.
+		d.OnClose(func() {
+			if raw, ok := rawHolder.get(); ok {
+				_ = raw.Close()
+			}
+		})
+	}
 	var dc *webrtc.DataChannel
 	if initiator {
 		dc, err = pc.CreateDataChannel("conduit", nil)
 		if err != nil {
 			return nil, fmt.Errorf("opening session: creating dc: %w", err)
 		}
-		dc.OnOpen(func() {
-			raw, err := dc.Detach()
-			if err != nil {
-				openWait.setErr(fmt.Errorf("detaching dc: %w", err))
-				return
-			}
-			openWait.setRWC(raw)
-		})
+		wireDC(dc)
 	} else {
 		pc.OnDataChannel(func(remoteDC *webrtc.DataChannel) {
 			dc = remoteDC
-			remoteDC.OnOpen(func() {
-				raw, err := remoteDC.Detach()
-				if err != nil {
-					openWait.setErr(fmt.Errorf("detaching dc: %w", err))
-					return
-				}
-				openWait.setRWC(raw)
-			})
+			wireDC(remoteDC)
 		})
 	}
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
@@ -358,6 +368,26 @@ func (s *Session) Close(ctx context.Context) error {
 // session-mode peer (which deliberately stays open between transfers)
 // doesn't make the local side feel hung.
 const teardownTimeout = 2 * time.Second
+
+// atomicRWC is a one-set io.ReadWriteCloser slot, safe to set from
+// OnOpen and read from OnClose without ordering assumptions about which
+// callback fires first.
+type atomicRWC struct {
+	mu  sync.Mutex
+	rwc io.ReadWriteCloser
+}
+
+func (a *atomicRWC) set(r io.ReadWriteCloser) {
+	a.mu.Lock()
+	a.rwc = r
+	a.mu.Unlock()
+}
+
+func (a *atomicRWC) get() (io.ReadWriteCloser, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.rwc, a.rwc != nil
+}
 
 // lockedTagWriter is tagWriter with a mutex around each frame Write so it
 // shares the data channel safely with sessionAckingWriter, and chunks

@@ -112,6 +112,7 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 				return fmt.Errorf("running send: %w", err)
 			}
 			pr.Update(src.Preamble.Size, src.Preamble.Size)
+			pr.Done()
 			fmt.Fprintln(out, "sent")
 			return nil
 		},
@@ -274,6 +275,7 @@ type progressLine struct {
 	last     time.Time
 	maxWidth int
 	any      bool
+	done     bool
 }
 
 const progressMinInterval = 100 * time.Millisecond
@@ -298,17 +300,18 @@ func (p *progressLine) Update(done, total int64) {
 	p.write(p.formatLine(done, total))
 }
 
-// Done emits a final line and a trailing newline so subsequent output starts
-// on a fresh line. Safe to call when no Update was issued.
+// Done emits a trailing newline so subsequent output starts on a fresh
+// line. Idempotent — repeated calls are no-ops, so callers can both defer
+// Done for cleanup-on-error and call it explicitly to separate progress
+// output from a follow-up status line on stdout.
 func (p *progressLine) Done() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.any {
+	if p.done || !p.any {
 		return
 	}
-	if _, err := fmt.Fprint(p.w, "\n"); err != nil {
-		return
-	}
+	p.done = true
+	_, _ = fmt.Fprint(p.w, "\n")
 }
 
 func (p *progressLine) formatLine(done, total int64) string {
