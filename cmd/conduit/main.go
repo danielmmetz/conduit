@@ -108,6 +108,7 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 				return fmt.Errorf("running send: %w", err)
 			}
 			defer sess.Close(ctx)
+			fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
 			pr.Update(0, src.Preamble.Size)
 			if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
 				return fmt.Errorf("running send: %w", err)
@@ -189,6 +190,7 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 				return fmt.Errorf("running recv: %w", err)
 			}
 			defer sess.Close(ctx)
+			fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
 			select {
 			case err := <-done:
 				if err != nil {

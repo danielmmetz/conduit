@@ -29,6 +29,23 @@
     }
   }
 
+  // setConnectedStatus renders "Connected." plus a route pill (direct/relayed).
+  // route comes from the WASM onPaired callback; "unknown" is rendered without
+  // a pill so we don't show a misleading badge on edge cases (ICE not yet
+  // converged, getStats unavailable, etc.).
+  function setConnectedStatus(el, route) {
+    el.replaceChildren();
+    el.classList.remove("err");
+    el.classList.add("ok");
+    el.appendChild(document.createTextNode("Connected."));
+    if (route === "direct" || route === "relayed") {
+      const pill = document.createElement("span");
+      pill.className = "route-pill " + route;
+      pill.textContent = route;
+      el.appendChild(pill);
+    }
+  }
+
   // formatBytes renders a binary-prefixed byte count using KB/MB/GB labels.
   function formatBytes(n) {
     if (n == null || n < 0) return "";
@@ -510,12 +527,12 @@
             pasteTarget.disabled = true;
           }
         },
-        onPaired: () => {
+        onPaired: (route) => {
           if (!phrase) {
-            setStatus(pairedStatus, "Connected.", "ok");
+            setConnectedStatus(pairedStatus, route);
           } else {
             gotoPaired(null);
-            setStatus(pairedStatus, "Connected.", "ok");
+            setConnectedStatus(pairedStatus, route);
           }
           dropzone.classList.remove("disabled");
           pasteTarget.disabled = false;

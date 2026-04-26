@@ -40,6 +40,7 @@ type Session struct {
 	w        io.Writer
 	sig      wire.MsgConn
 	key      []byte
+	route    Route
 
 	// writeMu serializes frame writes on the data channel. Push (tagData /
 	// tagEOF) and Pull's ack writer (tagAck) share the channel; each Write
@@ -67,6 +68,56 @@ type Session struct {
 type dataFrame struct {
 	eof     bool
 	payload []byte
+}
+
+// Route describes the transport selected by ICE for this session: direct
+// peer-to-peer (host/srflx/prflx) or relayed through a TURN server. Sampled
+// once just after the data channel opens; not updated on later ICE restarts.
+type Route int
+
+const (
+	RouteUnknown Route = iota
+	RouteDirect
+	RouteRelayed
+)
+
+func (r Route) String() string {
+	switch r {
+	case RouteDirect:
+		return "direct"
+	case RouteRelayed:
+		return "relayed"
+	default:
+		return "unknown"
+	}
+}
+
+// detectRoute reads the ICE selected candidate pair and classifies the
+// transport. Returns RouteUnknown if the chain is not yet populated or the
+// selected pair is unavailable — pion exposes the chain on both native and
+// js/wasm builds, but the selected pair only becomes non-nil after ICE
+// concludes. Callers should sample after the data channel has opened.
+func detectRoute(pc *webrtc.PeerConnection) Route {
+	sctp := pc.SCTP()
+	if sctp == nil {
+		return RouteUnknown
+	}
+	dtls := sctp.Transport()
+	if dtls == nil {
+		return RouteUnknown
+	}
+	ice := dtls.ICETransport()
+	if ice == nil {
+		return RouteUnknown
+	}
+	pair, err := ice.GetSelectedCandidatePair()
+	if err != nil || pair == nil || pair.Local == nil || pair.Remote == nil {
+		return RouteUnknown
+	}
+	if pair.Local.Typ == webrtc.ICECandidateTypeRelay || pair.Remote.Typ == webrtc.ICECandidateTypeRelay {
+		return RouteRelayed
+	}
+	return RouteDirect
 }
 
 // Initiate opens a session as the WebRTC offerer. The peer must call
@@ -168,6 +219,7 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 		w:           wrapSendWriter(dc, raw),
 		sig:         sig,
 		key:         key,
+		route:       detectRoute(pc),
 		inFrames:    make(chan dataFrame),
 		demuxDone:   make(chan struct{}),
 		demuxCancel: demuxCancel,
@@ -374,6 +426,12 @@ func (s *Session) Close(ctx context.Context) error {
 		s.demuxWG.Wait()
 	})
 	return s.closeErr
+}
+
+// Route reports the transport ICE selected for this session — direct
+// peer-to-peer or relayed through TURN. Sampled at session open.
+func (s *Session) Route() Route {
+	return s.route
 }
 
 // teardownTimeout bounds exchangeTeardown during Close. Cooperating peers

@@ -7,6 +7,7 @@
   --border: #2a3038;
   --panel: #161a21;
   --ok: #6ee7b7;
+  --warn: #fbbf24;
   --err: #fca5a5;
   font-family:
     ui-sans-serif,
@@ -469,6 +470,27 @@ button#recvBtn:disabled {
 
 .status.err {
   color: var(--err);
+}
+
+.route-pill {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  vertical-align: 1px;
+  margin-left: 0.5em;
+  border: 1px solid currentColor;
+}
+
+.route-pill.direct {
+  color: var(--ok);
+}
+
+.route-pill.relayed {
+  color: var(--warn);
 }
 
 .text-box {

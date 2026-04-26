@@ -328,3 +328,9 @@ func (s *Session) PumpErr() error {
 	<-s.pumpDone
 	return s.pumpErr
 }
+
+// Route reports the transport ICE selected for this session — direct
+// peer-to-peer or relayed through TURN. Available immediately after Open*.
+func (s *Session) Route() rtc.Route {
+	return s.rtc.Route()
+}

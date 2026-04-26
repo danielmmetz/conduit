@@ -85,8 +85,10 @@ func (b *wasmBridge) registerSession(parent context.Context, exports js.Value) {
 // openSenderJS(server, callbacks) → sessionId.
 // callbacks fields (all optional):
 //
-//	onCode(code), onPaired(), onTransfer(preamble, uint8array),
+//	onCode(code), onPaired(route), onTransfer(preamble, uint8array),
 //	onProgress(direction, doneBytes), onError(msg), onClosed().
+//
+// onPaired's route is "direct", "relayed", or "unknown".
 func (b *wasmBridge) openSenderJS(parent context.Context, args []js.Value) any {
 	if len(args) < 2 {
 		return js.Null()
@@ -123,7 +125,7 @@ func (b *wasmBridge) openSenderJS(parent context.Context, args []js.Value) any {
 			return
 		}
 		h.sess = sess
-		safeInvoke(onPaired)
+		safeInvoke(onPaired, sess.Route().String())
 		b.watchPeerClose(h, id)
 	})
 	return id
@@ -170,7 +172,7 @@ func (b *wasmBridge) openReceiverJS(parent context.Context, args []js.Value) any
 			return
 		}
 		h.sess = sess
-		safeInvoke(onPaired)
+		safeInvoke(onPaired, sess.Route().String())
 		b.watchPeerClose(h, id)
 	})
 	return id
