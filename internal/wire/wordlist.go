@@ -1,7 +1,8 @@
 package wire
 
-// EFFShortWordlist is the canonical EFF short wordlist #1 (1296 words,
-// 4-6 letters, ~10.3 bits of entropy per word). See
+// EFFShortWordlist is the canonical EFF short wordlist #1, minus the single
+// hyphenated entry ("yo-yo") which would break our `-`-separated code format.
+// 1295 words; 4-6 letters; ~10.3 bits of entropy per word. See
 // https://www.eff.org/deeplinks/2016/07/new-wordlists-random-passphrases
 var EFFShortWordlist = []string{
 	"acid",
@@ -1289,7 +1290,6 @@ var EFFShortWordlist = []string{
 	"yeast",
 	"yelp",
 	"yield",
-	"yo-yo",
 	"yodel",
 	"yoga",
 	"yoyo",
