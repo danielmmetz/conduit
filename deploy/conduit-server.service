@@ -1,5 +1,5 @@
 [Unit]
-Description=conduit rendezvous + embedded TURN
+Description=conduit rendezvous / signaling server
 After=network-online.target
 Wants=network-online.target
 
@@ -7,18 +7,11 @@ Wants=network-online.target
 Type=simple
 User=conduit
 Group=conduit
-# /etc/conduit/server.env should define CONDUIT_TURN_PUBLIC_IP and
-# CONDUIT_TURN_SECRET (and any other CONDUIT_SERVER_* overrides).
+# /etc/conduit/server.env should define the CONDUIT_SERVER_* settings for the
+# chosen TURN provider, e.g. CONDUIT_SERVER_CLOUDFLARE_TURN_KEY_ID and
+# CONDUIT_SERVER_CLOUDFLARE_TURN_API_TOKEN for Cloudflare Realtime TURN.
 EnvironmentFile=/etc/conduit/server.env
-ExecStart=/usr/local/bin/conduit-server \
-  -addr 127.0.0.1:8080 \
-  -trust-xff \
-  -turn-embed \
-  -turn-public-ip ${CONDUIT_TURN_PUBLIC_IP} \
-  -turn-secret ${CONDUIT_TURN_SECRET}
-# Bind 3478 without running as root.
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStart=/usr/local/bin/conduit-server -addr 127.0.0.1:8080 -trust-xff
 Restart=on-failure
 RestartSec=5s
 

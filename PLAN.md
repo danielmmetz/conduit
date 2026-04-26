@@ -27,7 +27,7 @@ heavy inspiration from [croc], [e2ecp], [webwormhole], and [age]:
 | CLI shape          | `conduit send <path>`, `conduit recv <code>`                                                                   |
 | Payloads           | single file, directories (streamed PAX tar), stdin/stdout text, multiple files                                 |
 | Session policy     | Slots expire ~10 min idle; per-IP rate limits; no auth                                                         |
-| Deployment         | Single VPS: Caddy + app + TURN co-located                                                                      |
+| Deployment         | Single VPS: Caddy + app; TURN handled by Cloudflare Realtime                                                   |
 | Wordlist           | EFF short                                                                                                      |
 | Distribution       | GitHub Releases                                                                                                |
 
@@ -38,15 +38,12 @@ heavy inspiration from [croc], [e2ecp], [webwormhole], and [age]:
       │                                                                   │
  ┌────┤  Caddy (TLS, static site, reverse proxy)                          │
  │    │    ├── serves /  (Go-WASM web client, static assets)              │
- │    │    ├── proxies /ws → signaling server (WebSocket)                 │
- │    │    └── proxies :3478/:5349 → pion-turn                            │
+ │    │    └── proxies /ws → signaling server (WebSocket)                 │
  │    │                                                                   │
  │    │  signaling server (Go)                                            │
  │    │    - slot reservation, rate limiting                              │
  │    │    - blind message relay between two peers in a slot              │
- │    │    - issues short-lived TURN credentials (HMAC time-based)        │
- │    │                                                                   │
- │    │  pion-turn (same process or sidecar)                              │
+ │    │    - mints short-lived TURN credentials (Cloudflare or HMAC)      │
  └────┘                                                                   │
       └───────────────────────────────────────────────────────────────────┘
                 ▲                                 ▲
@@ -55,7 +52,9 @@ heavy inspiration from [croc], [e2ecp], [webwormhole], and [age]:
            ┌────┴─────┐                     ┌─────┴────┐
            │  Sender  │◄═══ WebRTC SCTP ═══►│ Receiver │
            │ CLI/web  │  (direct, or TURN)  │ CLI/web  │
-           └──────────┘                     └──────────┘
+           └──────────┘            ▲        └──────────┘
+                                   │
+                          turn.cloudflare.com
 ```
 
 ## Protocol
@@ -111,14 +110,13 @@ runs once per file, not per chunk).
 
 - `internal/signaling` — slot map (in-memory), WebSocket handlers, relay loop,
   expiry (ticker, default 10 min idle).
-- `internal/turnauth` — `username = ${unix_ts+ttl}:conduit`,
-  `credential = HMAC-SHA1(secret, username)` (RFC 8489 short-term creds).
+- `internal/turnauth` — `Issuer` interface and `CloudflareIssuer`, which
+  mints short-lived credentials from Cloudflare Realtime TURN (via the Calls
+  API) with caching and proactive re-mint.
 - `internal/ratelimit` — token bucket per source IP (from `X-Forwarded-For` via
   Caddy), separate buckets for reserve/join.
 - `cmd/conduit-server` — flags, config, graceful shutdown, `/healthz`
   (liveness: returns 200 if the slot map / accept loop are running).
-- `cmd/conduit-turn` — thin wrapper around `github.com/pion/turn/v3` bound on
-  3478/udp+tcp, 5349/tls.
 
 ## CLI (`cmd/conduit`)
 
@@ -188,8 +186,8 @@ the CLI and the WASM build.
    ciphertext between two CLIs, no network.
 4. **WebRTC.** pion data-channels + ICE + TURN credential issuance. Direct
    path only; verify P2P file copy.
-5. **TURN fallback.** pion-turn co-process; force-relay flag to exercise the
-   path.
+5. **TURN fallback.** Cloudflare Realtime TURN credential issuer; force-relay
+   flag to exercise the path.
 6. **WASM + web UI.** Same `internal/wire` compiled to WASM; static SPA;
    QR + fragment link.
 7. **Payload shapes.** Streaming tar for dirs, stdin/stdout, multi-file,
@@ -206,5 +204,3 @@ the CLI and the WASM build.
 - **Resume / chunked-hash / fine-grained progress.** Deliberately deferred
   from v1.
 - **Async drop-off / long-term age identities / multi-recipient.** Out of v1.
-- **Managed TURN migration path.** Keep TURN creds issuance pluggable so
-  swapping pion-turn for Twilio / Metered later is a config change.

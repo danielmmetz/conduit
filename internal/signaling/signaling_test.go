@@ -93,11 +93,19 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+// stubIssuer returns a fixed credential. Lets the signaling tests verify TURN
+// frame plumbing without depending on a real provider.
+type stubIssuer struct{ creds turnauth.Creds }
+
+func (s *stubIssuer) Issue(context.Context) (turnauth.Creds, error) { return s.creds, nil }
+
 func TestReservePairedIncludesTurnForBothPeers(t *testing.T) {
-	iss, err := turnauth.NewIssuer([]byte("test-turn-secret"), []string{"turn:example.com:3478"}, time.Minute, "conduit", func() time.Time { return time.Unix(1700000000, 0) })
-	if err != nil {
-		t.Fatal(err)
-	}
+	iss := &stubIssuer{creds: turnauth.Creds{
+		URIs:       []string{"turn:example.com:3478"},
+		Username:   "test-username",
+		Credential: "test-credential",
+		TTL:        60,
+	}}
 	h := newTestHarness(t, signaling.WithTurnIssuer(iss))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()

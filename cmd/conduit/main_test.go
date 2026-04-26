@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,8 +18,6 @@ import (
 
 	"github.com/danielmmetz/conduit/internal/client"
 	"github.com/danielmmetz/conduit/internal/signaling"
-	"github.com/danielmmetz/conduit/internal/turnauth"
-	"github.com/danielmmetz/conduit/internal/turnserver"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -143,96 +140,6 @@ func TestSendRecvFileRoundTrip(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("received %d bytes, want %d (prefix recv %q want %q)",
 			len(got), len(payload), truncateForLog(got, 64), truncateForLog(payload, 64))
-	}
-}
-
-// TestSendRecvForceRelayRoundTrip stands up a loopback TURN server alongside the
-// signaling server and runs send/recv with --force-relay on both sides. This
-// exercises the relay code path end-to-end: ICE gathers only relay candidates,
-// so all SCTP traffic flows through pion-turn (not direct host pairs), and the
-// credentials it authenticates with come from the same HMAC secret the
-// signaling server uses in turnauth.Issue.
-func TestSendRecvForceRelayRoundTrip(t *testing.T) {
-	secret := "phase5-relay-secret"
-
-	udpConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen udp: %v", err)
-	}
-	turnAddr := udpConn.LocalAddr().(*net.UDPAddr)
-
-	turnSrv, err := turnserver.Start(turnserver.Config{
-		Secret:      secret,
-		RelayIP:     net.ParseIP("127.0.0.1"),
-		BindAddress: "127.0.0.1",
-		UDPListener: udpConn,
-		LogWriter:   t.Output(),
-	})
-	if err != nil {
-		t.Fatalf("turnserver start: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := turnSrv.Close(); err != nil {
-			t.Errorf("turnserver close: %v", err)
-		}
-	})
-
-	turnURI := fmt.Sprintf("turn:%s?transport=udp", turnAddr.String())
-	iss, err := turnauth.NewIssuer([]byte(secret), []string{turnURI}, 5*time.Minute, "conduit", time.Now)
-	if err != nil {
-		t.Fatalf("issuer: %v", err)
-	}
-
-	srv := signaling.NewServer(
-		slog.New(slog.NewTextHandler(t.Output(), nil)),
-		signaling.WithSlotTTL(5*time.Second),
-		signaling.WithHelloTimeout(5*time.Second),
-		signaling.WithTurnIssuer(iss),
-	)
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /ws", srv.HandleWS)
-	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
-
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-
-	var sendBuf, recvBuf syncBuffer
-	codeCh := make(chan string, 1)
-	sendOut := codeNotifyBuffer{buf: &sendBuf, ch: codeCh}
-
-	payload := "relayed via TURN on loopback"
-
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
-		defer close(codeCh)
-		if err := mainE(gctx, logger, nil, &sendOut, []string{"send", "--server", ts.URL, "--force-relay", "--text", payload}); err != nil {
-			return fmt.Errorf("send: %w", err)
-		}
-		return nil
-	})
-	g.Go(func() error {
-		var code string
-		select {
-		case c, ok := <-codeCh:
-			if !ok {
-				return fmt.Errorf("recv: sender exited before code was available")
-			}
-			code = c
-		case <-gctx.Done():
-			return fmt.Errorf("recv: %w", gctx.Err())
-		}
-		if err := mainE(gctx, logger, nil, &recvBuf, []string{"recv", "--server", ts.URL, "--force-relay", code}); err != nil {
-			return fmt.Errorf("recv: %w", err)
-		}
-		return nil
-	})
-	if err := g.Wait(); err != nil {
-		t.Fatalf("force-relay send/recv: %v (sender out=%q)", err, sendBuf.String())
-	}
-	if got := strings.TrimSpace(recvBuf.String()); got != payload {
-		t.Errorf("recv output = %q, want %q", got, payload)
 	}
 }
 

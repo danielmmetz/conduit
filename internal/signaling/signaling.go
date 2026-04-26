@@ -37,7 +37,7 @@ type Server struct {
 	maxConcurrent      int
 	reserveLimiter     *ratelimit.KeyedLimiter
 	joinLimiter        *ratelimit.KeyedLimiter
-	turnIssuer         *turnauth.Issuer
+	turnIssuer         turnauth.Issuer
 	trustXForwardedFor bool
 
 	mu    sync.Mutex
@@ -89,7 +89,7 @@ func WithJoinLimiter(l *ratelimit.KeyedLimiter) Option {
 
 // WithTurnIssuer installs a TURN credential issuer. When set, the server
 // includes fresh credentials in every Reserved frame.
-func WithTurnIssuer(iss *turnauth.Issuer) Option {
+func WithTurnIssuer(iss turnauth.Issuer) Option {
 	return func(s *Server) { s.turnIssuer = iss }
 }
 
@@ -212,16 +212,7 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 	defer sl.cancel()
 	defer s.removeSlot(sl.id)
 
-	reserved := wire.Reserved{Op: wire.OpReserved, Slot: sl.id}
-	if s.turnIssuer != nil {
-		creds := s.turnIssuer.Issue()
-		reserved.TURN = &wire.TurnCreds{
-			URIs:       creds.URIs,
-			Username:   creds.Username,
-			Credential: creds.Credential,
-			TTL:        creds.TTL,
-		}
-	}
+	reserved := wire.Reserved{Op: wire.OpReserved, Slot: sl.id, TURN: s.issueTURN(ctx, logger)}
 	if err := writeJSON(ctx, conn, reserved); err != nil {
 		return
 	}
@@ -252,10 +243,11 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 	// From here, both peers are attached. Announce pairing to each end, then
 	// release the receiver handler to start relaying. Fresh TURN credentials
 	// (when configured) are included so both peers can gather relay candidates.
-	if err := writeJSON(ctx, conn, s.pairedCtl()); err != nil {
+	paired := s.pairedCtl(ctx, logger)
+	if err := writeJSON(ctx, conn, paired); err != nil {
 		return
 	}
-	if err := writeJSON(ctx, sl.receiverConn, s.pairedCtl()); err != nil {
+	if err := writeJSON(ctx, sl.receiverConn, paired); err != nil {
 		return
 	}
 	close(sl.relayStart)
@@ -448,18 +440,29 @@ func relay(ctx context.Context, src, dst *websocket.Conn) error {
 	}
 }
 
-func (s *Server) pairedCtl() wire.Paired {
-	msg := wire.Paired{Op: wire.OpPaired}
-	if s.turnIssuer != nil {
-		creds := s.turnIssuer.Issue()
-		msg.TURN = &wire.TurnCreds{
-			URIs:       creds.URIs,
-			Username:   creds.Username,
-			Credential: creds.Credential,
-			TTL:        creds.TTL,
-		}
+func (s *Server) pairedCtl(ctx context.Context, logger *slog.Logger) wire.Paired {
+	return wire.Paired{Op: wire.OpPaired, TURN: s.issueTURN(ctx, logger)}
+}
+
+// issueTURN mints credentials for inclusion in a Reserved/Paired control
+// frame. Returns nil if no issuer is configured or if issuance failed; the
+// caller treats either as "no TURN advertised this round" so a transient
+// upstream blip doesn't break the whole signaling exchange.
+func (s *Server) issueTURN(ctx context.Context, logger *slog.Logger) *wire.TurnCreds {
+	if s.turnIssuer == nil {
+		return nil
 	}
-	return msg
+	creds, err := s.turnIssuer.Issue(ctx)
+	if err != nil {
+		logger.WarnContext(ctx, "issuing turn credentials", slog.Any("err", err))
+		return nil
+	}
+	return &wire.TurnCreds{
+		URIs:       creds.URIs,
+		Username:   creds.Username,
+		Credential: creds.Credential,
+		TTL:        creds.TTL,
+	}
 }
 
 func writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {

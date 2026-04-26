@@ -4,13 +4,13 @@ Encrypted file and text transfer between two online peers: a short **join code**
 
 ## Install
 
-Pre-built binaries for Linux, macOS, and Windows are on the [GitHub Releases](https://github.com/danielmmetz/conduit/releases) page. Each archive ships `conduit`, `conduit-server`, and `conduit-turn`:
+Pre-built binaries for Linux, macOS, and Windows are on the [GitHub Releases](https://github.com/danielmmetz/conduit/releases) page. Each archive ships `conduit` and `conduit-server`:
 
 ```bash
 # Replace VERSION / OS / ARCH as needed (e.g. v0.1.0 / linux / amd64).
 curl -LO https://github.com/danielmmetz/conduit/releases/download/VERSION/conduit_VERSION_OS_ARCH.tar.gz
 tar -xzf conduit_VERSION_OS_ARCH.tar.gz
-sudo install -m 0755 conduit conduit-server conduit-turn /usr/local/bin/
+sudo install -m 0755 conduit conduit-server /usr/local/bin/
 ```
 
 Verify against `checksums.txt` from the same release.
@@ -22,7 +22,6 @@ Requires [Go](https://go.dev/dl/) 1.26 or newer. From the repo root:
 ```bash
 go build -o conduit ./cmd/conduit
 go build -o conduit-server ./cmd/conduit-server
-go build -o conduit-turn ./cmd/conduit-turn
 ```
 
 Regenerate the embedded browser bundle (`wasm_exec.js` and `main.wasm` under `cmd/conduit-server/web/`) after changing `cmd/conduit-wasm`, or if those files are missing before you build the server:
@@ -41,29 +40,15 @@ This runs `tools/genwasm`, which copies `wasm_exec.js` from `GOROOT` and cross-c
 
 Open the web UI at [http://localhost:8080](http://localhost:8080) (same port serves static assets and `GET /ws`). Health check: `GET /healthz` on the same origin (e.g. `http://localhost:8080/healthz`).
 
-Optional TURN credential issuance (both CLI and web use it when present). You can either point clients at an external TURN service, or run TURN **inside** `conduit-server`:
-
-**In-process TURN** (same binary; default UDP/TCP listeners `:3478`):
+Optional TURN credential issuance via Cloudflare Realtime TURN (both CLI and web use it when present). Create a TURN key in the [Cloudflare Calls dashboard](https://dash.cloudflare.com/?to=/:account/calls), then:
 
 ```bash
 ./conduit-server -addr :8080 \
-  -turn-embed \
-  -turn-public-ip '127.0.0.1'
+  -cloudflare-turn-key-id '<KEY_ID>' \
+  -cloudflare-turn-api-token '<PER_KEY_API_TOKEN>'
 ```
 
-With `-turn-embed`, if you omit `-turn-secret` the process generates a random 32-byte HMAC key at startup (issuer and embedded TURN stay in sync). Use an explicit `-turn-secret` when you need the same key after restarts or when using a separate `conduit-turn` process.
-
-If you omit `-turn-uri`, the server advertises `turn:<turn-public-ip>:<port>?transport=udp` using the port from `-turn-listen-udp` (default `3478`). Set `-turn-uri` yourself when clients must use a hostname or non-default port.
-
-**External TURN** (separate process or vendor): issue credentials and advertise where clients should connect:
-
-```bash
-./conduit-server -addr :8080 \
-  -turn-secret 'a-long-random-secret' \
-  -turn-uri 'turn:turn.example:3478?transport=udp'
-```
-
-For a standalone relay that matches `conduit-server` credentials, build `conduit-turn` (same `internal/turnserver` stack as `--turn-embed`).
+The signaling server caches a credential per `--cloudflare-turn-ttl-seconds` (default 1h) and re-mints proactively at ~75% TTL, so the API is hit at most a few times per hour regardless of session rate. To plug in a different TURN provider, implement `turnauth.Issuer` and pass it via `signaling.WithTurnIssuer`.
 
 ## CLI usage
 
@@ -102,17 +87,17 @@ The server embeds the SPA under `cmd/conduit-server/web/`. After `go generate ./
 
 `deploy/` contains example configs for a single-VPS deployment:
 
-- [`deploy/Caddyfile`](deploy/Caddyfile) — TLS termination and reverse proxy for `/ws` and the embedded SPA. Caddy does **not** front TURN (UDP is not proxied); `conduit-server -turn-embed` binds 3478 directly, so open 3478/udp+tcp on the firewall.
-- [`deploy/conduit-server.service`](deploy/conduit-server.service) — systemd unit running as a dedicated `conduit` user with `CAP_NET_BIND_SERVICE` (to bind 3478 unprivileged) and the usual sandboxing. Reads `/etc/conduit/server.env` for `CONDUIT_TURN_PUBLIC_IP` and `CONDUIT_TURN_SECRET`.
+- [`deploy/Caddyfile`](deploy/Caddyfile) — TLS termination and reverse proxy for `/ws` and the embedded SPA.
+- [`deploy/conduit-server.service`](deploy/conduit-server.service) — systemd unit running as a dedicated `conduit` user with the usual sandboxing. Reads `/etc/conduit/server.env` for `CONDUIT_SERVER_*` overrides (e.g. the Cloudflare TURN credentials).
 
-Sketch:
+Sketch (Cloudflare TURN):
 
 ```bash
 sudo useradd --system --home /var/lib/conduit --shell /usr/sbin/nologin conduit
 sudo install -d -o conduit -g conduit /etc/conduit
 sudo tee /etc/conduit/server.env >/dev/null <<EOF
-CONDUIT_TURN_PUBLIC_IP=203.0.113.10
-CONDUIT_TURN_SECRET=$(openssl rand -hex 32)
+CONDUIT_SERVER_CLOUDFLARE_TURN_KEY_ID=<key id from CF Calls dashboard>
+CONDUIT_SERVER_CLOUDFLARE_TURN_API_TOKEN=<per-key api token>
 EOF
 sudo chmod 0640 /etc/conduit/server.env
 sudo chown root:conduit /etc/conduit/server.env

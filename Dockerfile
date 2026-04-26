@@ -34,8 +34,5 @@ COPY --chmod=0555 --chown=65532:65532 --from=server /out/conduit-server /conduit
 USER 65532:65532
 
 EXPOSE 8080/tcp
-# Embedded TURN defaults; non-root cannot bind :3478 without extra caps — use high ports
-# (e.g. -turn-listen-udp :5349 -turn-listen-tcp :5349) or --cap-add=NET_BIND_SERVICE.
-EXPOSE 3478/tcp 3478/udp
 
 ENTRYPOINT ["/conduit-server"]
