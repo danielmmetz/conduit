@@ -64,5 +64,7 @@ golang.org/x/time v0.15.0 h1:bbrp8t3bGUeFOx08pvsMYRTCVSMk89u4tKbNOZbp88U=
 golang.org/x/time v0.15.0/go.mod h1:Y4YMaQmXwGQZoFaVFk4YpCt4FLQMYKZe9oeV/f4MSno=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+rsc.io/qr v0.2.0 h1:6vBLea5/NRMVTz8V66gipeLycZMl/+UlFmk8DvqQ6WY=
+rsc.io/qr v0.2.0/go.mod h1:IF+uZjkb9fqyeF/4tlBoynqmQxUoPfWEKh921coOuXs=
 salsa.debian.org/vasudev/gospake2 v0.0.0-20210510093858-d91629950ad1 h1:m65DhEZR/5zbgOGW4sQGDZmIwro+xBGIBQGWm43SlxM=
 salsa.debian.org/vasudev/gospake2 v0.0.0-20210510093858-d91629950ad1/go.mod h1:soKzqXBAtqHTODjyA0VzH2iERtpzN1w65eZUfetn2cQ=

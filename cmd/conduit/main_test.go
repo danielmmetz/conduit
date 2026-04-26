@@ -407,6 +407,31 @@ func TestReceivePageURL(t *testing.T) {
 	}
 }
 
+func TestRenderQR(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	if err := renderQR(&buf, "https://conduit.danielmmetz.com#7-foo-bar-baz"); err != nil {
+		t.Fatalf("renderQR: %v", err)
+	}
+	out := buf.String()
+	// Expect at least one full block and the trailing newlines from a
+	// rectangular grid; if either is missing the renderer is broken.
+	if !strings.ContainsRune(out, '█') {
+		t.Errorf("output is missing dark modules; got %q", truncateForLog([]byte(out), 80))
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) < 8 {
+		t.Errorf("got %d lines, want at least 8", len(lines))
+	}
+	width := len([]rune(lines[0]))
+	for i, ln := range lines {
+		if got := len([]rune(ln)); got != width {
+			t.Errorf("line %d width %d, want %d (output not rectangular)", i, got, width)
+			break
+		}
+	}
+}
+
 // extractCode pulls the numeric slot out of the "code: N" line.
 func extractCode(out string) (string, bool) {
 	const prefix = "code: "

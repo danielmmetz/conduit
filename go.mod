@@ -13,6 +13,7 @@ require (
 	github.com/pion/ice/v4 v4.2.2
 	github.com/pion/webrtc/v4 v4.2.11
 	golang.org/x/time v0.15.0
+	rsc.io/qr v0.2.0
 	salsa.debian.org/vasudev/gospake2 v0.0.0-20210510093858-d91629950ad1
 )
 

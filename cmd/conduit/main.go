@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/danielmmetz/conduit/internal/xfer"
 	"github.com/peterbourgon/ff/v3"
 	"github.com/peterbourgon/ff/v3/ffcli"
+	"rsc.io/qr"
 )
 
 // defaultServerURL is the hosted rendezvous service. CLI defaults and the
@@ -65,9 +67,11 @@ func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out, stder
 func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text string
+	var showQR bool
 	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&text, "text", "", "text payload to send instead of a file")
+	fs.BoolVar(&showQR, "qr", false, "after printing the code, render a QR of the browser URL for scanning from a phone")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "send",
@@ -89,10 +93,16 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 			}
 			if err := client.Send(ctx, logger, server, policy, src.Preamble, src.Reader, func(code string) {
 				fmt.Fprintf(out, "code: %s\n", code)
-				if page, err := receivePageURL(server, code); err == nil {
+				page, pageErr := receivePageURL(server, code)
+				if pageErr == nil {
 					fmt.Fprintf(out, "receive in the browser: %s\n", page)
 				}
 				fmt.Fprintf(out, "receive on the CLI: %s\n", recvCLIHint(server, code))
+				if showQR && pageErr == nil {
+					if err := renderQR(out, page); err != nil {
+						fmt.Fprintf(stderr, "qr render failed: %v\n", err)
+					}
+				}
 				fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
 			}, onProgress); err != nil {
 				return fmt.Errorf("running send: %w", err)
@@ -193,6 +203,41 @@ func receivePageURL(server, code string) (string, error) {
 	}
 	u.Fragment = code
 	return u.String(), nil
+}
+
+// renderQR writes s to w as a QR using Unicode half-blocks (two QR rows per terminal row).
+func renderQR(w io.Writer, s string) error {
+	code, err := qr.Encode(s, qr.M)
+	if err != nil {
+		return fmt.Errorf("encoding qr: %w", err)
+	}
+	// 4-module quiet zone is part of the QR spec; without it many phone scanners refuse to lock.
+	const quiet = 4
+	black := func(x, y int) bool {
+		if x < 0 || y < 0 || x >= code.Size || y >= code.Size {
+			return false
+		}
+		return code.Black(x, y)
+	}
+	var b strings.Builder
+	for y := -quiet; y < code.Size+quiet; y += 2 {
+		for x := -quiet; x < code.Size+quiet; x++ {
+			top, bot := black(x, y), black(x, y+1)
+			switch {
+			case top && bot:
+				b.WriteRune('█')
+			case top:
+				b.WriteRune('▀')
+			case bot:
+				b.WriteRune('▄')
+			default:
+				b.WriteByte(' ')
+			}
+		}
+		b.WriteByte('\n')
+	}
+	_, err = io.WriteString(w, b.String())
+	return err
 }
 
 // progressLine renders single-line transfer progress to w using a carriage
