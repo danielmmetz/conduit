@@ -32,13 +32,14 @@ import (
 // returns when the v1 sender's tagEOF arrives, and the rtc-level close
 // cascades back through exchangeTeardown.
 type Session struct {
-	cfg Config
-	pc  *webrtc.PeerConnection
-	dc  *webrtc.DataChannel
-	raw io.ReadWriteCloser
-	w   io.Writer
-	sig wire.MsgConn
-	key []byte
+	cfg      Config
+	pc       *webrtc.PeerConnection
+	dc       *webrtc.DataChannel
+	raw      io.ReadWriteCloser
+	closeRaw func()
+	w        io.Writer
+	sig      wire.MsgConn
+	key      []byte
 
 	// writeMu serializes frame writes on the data channel. Push (tagData /
 	// tagEOF) and Pull's ack writer (tagAck) share the channel; each Write
@@ -114,15 +115,11 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 		// peer's reflexive reset, so this is a no-op there.
 		d.OnClose(func() {
 			cfg.Logger.DebugContext(ctx, "dc onclose", slog.String("label", d.Label()))
-			if raw, ok := rawHolder.get(); ok {
-				_ = raw.Close()
-			}
+			rawHolder.close()
 		})
 		d.OnError(func(err error) {
 			cfg.Logger.DebugContext(ctx, "dc onerror", slog.String("err", err.Error()))
-			if raw, ok := rawHolder.get(); ok {
-				_ = raw.Close()
-			}
+			rawHolder.close()
 		})
 	}
 	var dc *webrtc.DataChannel
@@ -143,18 +140,12 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 		switch s {
 		case webrtc.PeerConnectionStateFailed:
 			openWait.setErr(fmt.Errorf("peer connection failed"))
-			if raw, ok := rawHolder.get(); ok {
-				_ = raw.Close()
-			}
+			rawHolder.close()
 		case webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateDisconnected:
 			// Force the local detached DC handle closed so the demuxer
 			// exits even if the data-channel layer's onclose event hasn't
-			// fired (or fires too late). The native build's own SCTP
-			// close path is unaffected because the handle is already
-			// closed by the time we get here in that scenario.
-			if raw, ok := rawHolder.get(); ok {
-				_ = raw.Close()
-			}
+			// fired (or fires too late).
+			rawHolder.close()
 		}
 	})
 
@@ -173,6 +164,7 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 		pc:          pc,
 		dc:          dc,
 		raw:         raw,
+		closeRaw:    rawHolder.close,
 		w:           wrapSendWriter(dc, raw),
 		sig:         sig,
 		key:         key,
@@ -365,7 +357,7 @@ func (s *Session) Close(ctx context.Context) error {
 			// succeeds and the peer-disagreement case is expected when
 			// the other side wants its session to remain open.
 		}
-		_ = s.raw.Close()
+		s.closeRaw()
 		closeTimer := time.NewTimer(5 * time.Second)
 		defer closeTimer.Stop()
 		select {
@@ -393,24 +385,31 @@ func (s *Session) Close(ctx context.Context) error {
 // close event within a few additional milliseconds.
 const teardownTimeout = 500 * time.Millisecond
 
-// atomicRWC is a one-set io.ReadWriteCloser slot, safe to set from
-// OnOpen and read from OnClose without ordering assumptions about which
-// callback fires first.
+// atomicRWC is a one-set io.ReadWriteCloser slot, safe to set from OnOpen
+// and read from OnClose-style callbacks without ordering assumptions about
+// which fires first. close() is idempotent — all of the data-channel
+// teardown paths (DC onclose, DC onerror, PC state change, Session.Close)
+// route through the same sync.OnceValue-wrapped underlying Close, so
+// pion-wasm's non-idempotent detachedDataChannel.Close (which panics on
+// `close(c.done)` if called twice) only sees one invocation.
 type atomicRWC struct {
-	mu  sync.Mutex
-	rwc io.ReadWriteCloser
+	mu      sync.Mutex
+	closeFn func() error
 }
 
 func (a *atomicRWC) set(r io.ReadWriteCloser) {
 	a.mu.Lock()
-	a.rwc = r
+	a.closeFn = sync.OnceValue(r.Close)
 	a.mu.Unlock()
 }
 
-func (a *atomicRWC) get() (io.ReadWriteCloser, bool) {
+func (a *atomicRWC) close() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.rwc, a.rwc != nil
+	fn := a.closeFn
+	a.mu.Unlock()
+	if fn != nil {
+		_ = fn()
+	}
 }
 
 // lockedTagWriter is tagWriter with a mutex around each frame Write so it
