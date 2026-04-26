@@ -16,6 +16,7 @@ import (
 
 	"github.com/danielmmetz/conduit/internal/client"
 	"github.com/danielmmetz/conduit/internal/wire"
+	"rsc.io/qr"
 )
 
 func main() {
@@ -50,7 +51,36 @@ func (b *wasmBridge) register(ctx context.Context) {
 	exports.Set("sendText", js.FuncOf(func(this js.Value, args []js.Value) any {
 		return b.sendTextJS(ctx, this, args)
 	}))
+	exports.Set("qr", js.FuncOf(func(_ js.Value, args []js.Value) any {
+		return qrJS(args)
+	}))
 	js.Global().Set("conduit", exports)
+}
+
+// qrJS(text) → {size, modules} where modules is a Uint8Array of length
+// size*size with each byte 1 (dark) or 0 (light), row-major. Returns null on
+// encode failure (e.g. text too long for the medium ECC level). The caller
+// adds its own quiet zone when rendering.
+func qrJS(args []js.Value) any {
+	if len(args) < 1 {
+		return js.Null()
+	}
+	code, err := qr.Encode(args[0].String(), qr.M)
+	if err != nil {
+		return js.Null()
+	}
+	out := make([]byte, code.Size*code.Size)
+	for y := 0; y < code.Size; y++ {
+		for x := 0; x < code.Size; x++ {
+			if code.Black(x, y) {
+				out[y*code.Size+x] = 1
+			}
+		}
+	}
+	obj := js.Global().Get("Object").New()
+	obj.Set("size", code.Size)
+	obj.Set("modules", uint8ArrayFromBytes(out))
+	return obj
 }
 
 // startOp runs f in a tracked goroutine. A panic inside f (including one

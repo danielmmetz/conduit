@@ -1,4 +1,4 @@
-/* global Go, QRCode */
+/* global Go */
 
 (function () {
   "use strict";
@@ -236,24 +236,47 @@
     if (typeof globalThis.conduit.sendText !== "function") {
       throw new Error("WASM did not register conduit.sendText");
     }
+    if (typeof globalThis.conduit.qr !== "function") {
+      throw new Error("WASM did not register conduit.qr");
+    }
   }
 
+  // renderQR draws text as a QR code into host. Uses globalThis.conduit.qr —
+  // the same rsc.io/qr encoder the CLI uses — so the page has no third-party
+  // QR dependency. The 4-module quiet zone matches the CLI and the QR spec.
   function renderQR(host, text) {
     host.replaceChildren();
-    if (!text || typeof QRCode === "undefined") {
+    if (!text || typeof globalThis.conduit?.qr !== "function") {
       return;
     }
-    QRCode.toCanvas(
-      text,
-      { width: 160, margin: 2, color: { dark: "#000000ff", light: "#ffffffff" } },
-      (err, canvas) => {
-        if (err) {
-          console.warn("qrcode:", err);
-          return;
+    const result = globalThis.conduit.qr(text);
+    if (!result) {
+      return;
+    }
+    const { size, modules } = result;
+    const quiet = 4;
+    const cells = size + quiet * 2;
+    const cellPx = 5;
+    const cssSize = cells * cellPx;
+    const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+    const canvas = document.createElement("canvas");
+    canvas.width = cssSize * dpr;
+    canvas.height = cssSize * dpr;
+    canvas.style.width = cssSize + "px";
+    canvas.style.height = cssSize + "px";
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#000000";
+    const px = cellPx * dpr;
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if (modules[y * size + x]) {
+          ctx.fillRect((quiet + x) * px, (quiet + y) * px, px, px);
         }
-        host.appendChild(canvas);
       }
-    );
+    }
+    host.appendChild(canvas);
   }
 
   function wireUI(serviceWorkerDownloadOk) {
