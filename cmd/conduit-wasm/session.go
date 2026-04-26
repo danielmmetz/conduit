@@ -196,6 +196,10 @@ func (b *wasmBridge) sessionPushFileJS(args []js.Value) any {
 		safeInvoke(onDone, "session not found")
 		return js.Undefined()
 	}
+	if h.sess == nil {
+		safeInvoke(onDone, "session not yet open")
+		return js.Undefined()
+	}
 
 	preamble := wire.Preamble{
 		Kind: wire.PreambleKindFile,
@@ -225,6 +229,10 @@ func (b *wasmBridge) sessionPushTextJS(args []js.Value) any {
 	h := b.sessions.get(id)
 	if h == nil {
 		safeInvoke(onDone, "session not found")
+		return js.Undefined()
+	}
+	if h.sess == nil {
+		safeInvoke(onDone, "session not yet open")
 		return js.Undefined()
 	}
 	payload := []byte(text)
