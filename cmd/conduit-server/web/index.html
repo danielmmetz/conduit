@@ -20,15 +20,14 @@
         <input type="url" id="serverUrl" autocomplete="off" />
       </label>
 
-      <section class="panel" id="sendPanel">
-        <h2>Send</h2>
+      <section class="panel">
         <div
           class="dropzone"
           id="dropzone"
           tabindex="0"
           aria-label="Send a file"
         >
-          <p>Drop or <button type="button" id="pickBtn">choose</button> a file</p>
+          <p>Drop or <button type="button" id="pickBtn">choose</button> a file to send</p>
           <input type="file" id="fileInput" hidden />
         </div>
         <label class="field paste-field">
@@ -38,10 +37,23 @@
             autocomplete="off"
             spellcheck="true"
             aria-label="Paste to send text"
-            placeholder="Paste text"
+            placeholder="Paste text to send"
           ></textarea>
         </label>
         <p id="sendFileName" class="muted"></p>
+
+        <div class="receive-row">
+          <input
+            type="text"
+            id="recvCode"
+            placeholder="code to receive"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Code to receive"
+          />
+          <button type="button" id="recvBtn">Receive</button>
+        </div>
+
         <div id="sendCode" class="code-box" hidden>
           <p class="label">Code</p>
           <code id="codeText"></code>
@@ -61,29 +73,16 @@
           </div>
           <div id="qrHost"></div>
         </div>
+
         <div class="progress" id="sendProgress" hidden>
           <div class="bar" id="sendBar"></div>
         </div>
-        <p id="sendStatus" class="status" role="status"></p>
-      </section>
-
-      <section class="panel" id="recvPanel">
-        <h2>Receive</h2>
-        <label class="field">
-          <span>Code</span>
-          <input
-            type="text"
-            id="recvCode"
-            placeholder="code"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </label>
-        <button type="button" id="recvBtn">Receive</button>
         <div class="progress" id="recvProgress" hidden>
           <div class="bar" id="recvBar"></div>
         </div>
+        <p id="sendStatus" class="status" role="status"></p>
         <p id="recvStatus" class="status" role="status"></p>
+
         <div id="recvText" class="text-box" hidden>
           <div class="text-box-header">
             <span class="muted" id="recvTextLabel">Text</span>
