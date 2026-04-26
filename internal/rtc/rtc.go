@@ -207,7 +207,11 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 		})
 	}
 
-	tw := newTagWriter(raw)
+	// On JS the underlying RTCDataChannel.send throws once bufferedAmount
+	// crosses an undocumented browser ceiling; wrapSendWriter applies
+	// bufferedAmount-based backpressure before each frame. Native pion
+	// applies flow control in its SCTP layer, so the wrapper is a no-op.
+	tw := newTagWriter(wrapSendWriter(dc, raw))
 	wc, err := wire.Encrypt(tw, key)
 	if err != nil {
 		return fmt.Errorf("sending: starting encrypt: %w", err)
