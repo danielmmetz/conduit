@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 )
 
@@ -16,21 +15,15 @@ import (
 const cloudflareEndpoint = "https://rtc.live.cloudflare.com/v1/turn/keys"
 
 // CloudflareIssuer mints short-lived credentials from Cloudflare Realtime
-// TURN. It caches the most recently minted credential and re-mints when the
-// cache nears expiry, so the upstream API is hit at most once per (ttl - skew)
-// regardless of session rate.
+// TURN. Each Issue call mints fresh: Cloudflare expects one credential per
+// peer (per Allocate), so a cache that handed the same credential to multiple
+// callers would silently break TURN allocation for everyone but the first.
 type CloudflareIssuer struct {
 	keyID    string
 	apiToken string
 	ttl      time.Duration
 	endpoint string
 	client   *http.Client
-	now      func() time.Time
-
-	mu        sync.Mutex
-	cached    Creds
-	expiresAt time.Time // wall time the cached credential expires
-	refreshAt time.Time // wall time we proactively re-mint
 }
 
 // cloudflareOption configures a CloudflareIssuer in NewCloudflareIssuer.
@@ -41,15 +34,9 @@ func withCloudflareEndpoint(u string) cloudflareOption {
 	return func(c *CloudflareIssuer) { c.endpoint = u }
 }
 
-func withCloudflareNow(now func() time.Time) cloudflareOption {
-	return func(c *CloudflareIssuer) { c.now = now }
-}
-
 // NewCloudflareIssuer builds a CloudflareIssuer for the given TURN key ID
 // and per-key API token (both obtained from the Cloudflare Calls dashboard
-// or API). ttl is the lifetime requested per credential; the issuer
-// transparently re-mints when ~75% of a credential's TTL has elapsed so that
-// in-flight sessions never see a credential that's about to expire.
+// or API). ttl is the lifetime requested per credential.
 func NewCloudflareIssuer(keyID, apiToken string, ttl time.Duration, opts ...cloudflareOption) (*CloudflareIssuer, error) {
 	if keyID == "" {
 		return nil, fmt.Errorf("validating: cloudflare keyID must be non-empty")
@@ -66,7 +53,6 @@ func NewCloudflareIssuer(keyID, apiToken string, ttl time.Duration, opts ...clou
 		ttl:      ttl,
 		endpoint: cloudflareEndpoint,
 		client:   &http.Client{Timeout: 10 * time.Second},
-		now:      time.Now,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -74,53 +60,11 @@ func NewCloudflareIssuer(keyID, apiToken string, ttl time.Duration, opts ...clou
 	return c, nil
 }
 
-// Issue returns a credential, minting a fresh one from Cloudflare if the
-// cached credential is missing or close to expiry. Concurrent callers during
-// a refresh serialize on the issuer's mutex; in steady state Issue holds the
-// mutex only long enough to copy the cached value.
+// Issue mints a fresh credential from Cloudflare. Callers must not share the
+// returned Creds across peers — Cloudflare binds username/credential to a
+// single Allocate, so reuse causes the second peer's relay allocation to be
+// silently rejected.
 func (c *CloudflareIssuer) Issue(ctx context.Context) (Creds, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := c.now()
-	if !c.cached.zero() && now.Before(c.refreshAt) {
-		return c.cached, nil
-	}
-	fresh, err := c.mint(ctx)
-	if err == nil {
-		c.cached = fresh
-		c.expiresAt = now.Add(c.ttl)
-		// Re-mint when 75% of the TTL has elapsed: sessions that come in just
-		// after a refresh still get most of the requested TTL, and we tolerate
-		// brief Cloudflare API outages without dropping creds entirely.
-		c.refreshAt = now.Add(c.ttl - c.ttl/4)
-		return fresh, nil
-	}
-	// Mint failed: fall back to the cached credential if it's still inside
-	// its TTL rather than failing the whole signaling exchange — the worst
-	// case is a peer that refuses to renegotiate before its credential expires.
-	if !c.cached.zero() && now.Before(c.expiresAt) {
-		return c.cached, nil
-	}
-	return Creds{}, fmt.Errorf("minting cloudflare turn credential: %w", err)
-}
-
-func (c Creds) zero() bool { return c.Username == "" && c.Credential == "" && len(c.URIs) == 0 }
-
-// cloudflareResponse mirrors the relevant subset of the Cloudflare TURN
-// generate-ice-servers response. The endpoint returns one entry per
-// distinct credential set (typically one STUN entry without auth and one
-// TURN entry with auth); we flatten them into a single Creds.
-type cloudflareResponse struct {
-	IceServers []cloudflareIceServer `json:"iceServers"`
-}
-
-type cloudflareIceServer struct {
-	URLs       json.RawMessage `json:"urls"`
-	Username   string          `json:"username,omitempty"`
-	Credential string          `json:"credential,omitempty"`
-}
-
-func (c *CloudflareIssuer) mint(ctx context.Context) (Creds, error) {
 	body, err := json.Marshal(map[string]any{"ttl": int(c.ttl / time.Second)})
 	if err != nil {
 		return Creds{}, fmt.Errorf("marshaling request: %w", err)
@@ -181,6 +125,20 @@ func (c *CloudflareIssuer) mint(ctx context.Context) (Creds, error) {
 		Credential: credential,
 		TTL:        int(c.ttl / time.Second),
 	}, nil
+}
+
+// cloudflareResponse mirrors the relevant subset of the Cloudflare TURN
+// generate-ice-servers response. The endpoint returns one entry per
+// distinct credential set (typically one STUN entry without auth and one
+// TURN entry with auth); we flatten them into a single Creds.
+type cloudflareResponse struct {
+	IceServers []cloudflareIceServer `json:"iceServers"`
+}
+
+type cloudflareIceServer struct {
+	URLs       json.RawMessage `json:"urls"`
+	Username   string          `json:"username,omitempty"`
+	Credential string          `json:"credential,omitempty"`
 }
 
 // decodeURLs accepts both the WebRTC-style "urls" field forms: a single

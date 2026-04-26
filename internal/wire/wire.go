@@ -44,9 +44,8 @@ type ClientHello struct {
 }
 
 type Reserved struct {
-	Op   string     `json:"op"`
-	Slot uint32     `json:"slot"`
-	TURN *TurnCreds `json:"turn,omitempty"`
+	Op   string `json:"op"`
+	Slot uint32 `json:"slot"`
 }
 
 // TurnCreds carries short-term TURN credentials from the signaling server.

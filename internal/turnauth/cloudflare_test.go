@@ -89,63 +89,21 @@ func TestCloudflareIssueParsesResponse(t *testing.T) {
 	}
 }
 
-func TestCloudflareCachesUntilRefreshAt(t *testing.T) {
-	t.Parallel()
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(cfFixtureResponse))
-	}))
-	t.Cleanup(srv.Close)
-
-	now := time.Unix(1_700_000_000, 0)
-	clock := &now
-	iss, err := NewCloudflareIssuer("k", "t", 1*time.Hour,
-		withCloudflareEndpoint(srv.URL),
-		withCloudflareNow(func() time.Time { return *clock }),
-	)
-	if err != nil {
-		t.Fatalf("NewCloudflareIssuer: %v", err)
-	}
-	for i := range 5 {
-		if _, err := iss.Issue(t.Context()); err != nil {
-			t.Fatalf("issue %d: %v", i, err)
-		}
-	}
-	if got := calls.Load(); got != 1 {
-		t.Errorf("after 5 cached issues: calls = %d, want 1", got)
-	}
-	// Advance just past 75% of TTL to trigger a refresh.
-	*clock = now.Add(46 * time.Minute)
-	if _, err := iss.Issue(t.Context()); err != nil {
-		t.Fatalf("post-refresh issue: %v", err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Errorf("after refresh: calls = %d, want 2", got)
-	}
-}
-
-func TestCloudflareReusesCachedOnTransientError(t *testing.T) {
+// TestCloudflareIssueMintsFreshEveryCall guards against re-introducing a
+// cache: Cloudflare binds username/credential to a single Allocate, so
+// handing the same credential to two peers would silently break the second
+// peer's relay.
+func TestCloudflareIssueMintsFreshEveryCall(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := calls.Add(1)
-		if n == 1 {
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(cfFixtureResponse))
-			return
-		}
-		http.Error(w, "upstream busy", http.StatusBadGateway)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintf(w, `{"iceServers":[{"urls":["turn:t.example:3478"],"username":"u%d","credential":"c%d"}]}`, n, n)
 	}))
 	t.Cleanup(srv.Close)
 
-	now := time.Unix(1_700_000_000, 0)
-	clock := &now
-	iss, err := NewCloudflareIssuer("k", "t", 1*time.Hour,
-		withCloudflareEndpoint(srv.URL),
-		withCloudflareNow(func() time.Time { return *clock }),
-	)
+	iss, err := NewCloudflareIssuer("k", "t", time.Hour, withCloudflareEndpoint(srv.URL))
 	if err != nil {
 		t.Fatalf("NewCloudflareIssuer: %v", err)
 	}
@@ -153,18 +111,19 @@ func TestCloudflareReusesCachedOnTransientError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first issue: %v", err)
 	}
-	// Advance past refreshAt but still within expiresAt.
-	*clock = now.Add(50 * time.Minute)
-	got, err := iss.Issue(t.Context())
+	second, err := iss.Issue(t.Context())
 	if err != nil {
-		t.Fatalf("post-refresh issue with upstream error: %v", err)
+		t.Fatalf("second issue: %v", err)
 	}
-	if got.Credential != first.Credential {
-		t.Errorf("expected fallback to cached cred on upstream error: got %q, want %q", got.Credential, first.Credential)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("calls = %d, want 2", got)
+	}
+	if first.Credential == second.Credential || first.Username == second.Username {
+		t.Errorf("creds should differ across calls: first=%+v second=%+v", first, second)
 	}
 }
 
-func TestCloudflareErrorOnFirstMint(t *testing.T) {
+func TestCloudflareErrorOnFailedMint(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "no", http.StatusUnauthorized)
@@ -176,7 +135,7 @@ func TestCloudflareErrorOnFirstMint(t *testing.T) {
 		t.Fatalf("NewCloudflareIssuer: %v", err)
 	}
 	if _, err := iss.Issue(t.Context()); err == nil {
-		t.Fatal("expected error from first mint")
+		t.Fatal("expected error from failed mint")
 	}
 }
 
@@ -212,10 +171,10 @@ func TestCloudflareRespectsContext(t *testing.T) {
 func TestNewCloudflareIssuerValidatesArgs(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name              string
-		keyID, apiToken   string
-		ttl               time.Duration
-		wantErrSubstring  string
+		name             string
+		keyID, apiToken  string
+		ttl              time.Duration
+		wantErrSubstring string
 	}{
 		{"empty keyID", "", "tok", time.Hour, "keyID"},
 		{"empty token", "key", "", time.Hour, "apiToken"},
@@ -258,4 +217,3 @@ func TestCloudflareDecodeURLsAcceptsBothShapes(t *testing.T) {
 		t.Errorf("URIs = %v, want [turn:t.example:3478]", got.URIs)
 	}
 }
-

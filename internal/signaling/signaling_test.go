@@ -93,19 +93,31 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-// stubIssuer returns a fixed credential. Lets the signaling tests verify TURN
-// frame plumbing without depending on a real provider.
-type stubIssuer struct{ creds turnauth.Creds }
+// countingIssuer mints a distinct credential on every Issue call. The
+// per-call distinction lets tests verify that each peer in a pairing gets
+// its own credential — sharing one credential between peers silently breaks
+// TURN allocation for the second peer (Cloudflare and other providers bind
+// a credential to a single Allocate).
+type countingIssuer struct {
+	mu  sync.Mutex
+	n   int
+	uri string
+}
 
-func (s *stubIssuer) Issue(context.Context) (turnauth.Creds, error) { return s.creds, nil }
-
-func TestReservePairedIncludesTurnForBothPeers(t *testing.T) {
-	iss := &stubIssuer{creds: turnauth.Creds{
-		URIs:       []string{"turn:example.com:3478"},
-		Username:   "test-username",
-		Credential: "test-credential",
+func (c *countingIssuer) Issue(context.Context) (turnauth.Creds, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+	return turnauth.Creds{
+		URIs:       []string{c.uri},
+		Username:   fmt.Sprintf("user-%d", c.n),
+		Credential: fmt.Sprintf("cred-%d", c.n),
 		TTL:        60,
-	}}
+	}, nil
+}
+
+func TestPairedIncludesPerPeerTurn(t *testing.T) {
+	iss := &countingIssuer{uri: "turn:example.com:3478"}
 	h := newTestHarness(t, signaling.WithTurnIssuer(iss))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -116,9 +128,6 @@ func TestReservePairedIncludesTurnForBothPeers(t *testing.T) {
 	reserved := readEnvelope(t, ctx, sender)
 	if reserved.Op != wire.OpReserved {
 		t.Fatalf("op = %q, want %q", reserved.Op, wire.OpReserved)
-	}
-	if reserved.TURN == nil || len(reserved.TURN.URIs) != 1 {
-		t.Fatalf("reserved TURN = %+v, want non-empty URIs", reserved.TURN)
 	}
 
 	receiver := h.dial(ctx, t)
@@ -145,6 +154,9 @@ func TestReservePairedIncludesTurnForBothPeers(t *testing.T) {
 		if label.env.TURN.Credential == "" || label.env.TURN.Username == "" {
 			t.Fatalf("%s TURN missing username or credential", label.name)
 		}
+	}
+	if sPaired.TURN.Credential == rPaired.TURN.Credential || sPaired.TURN.Username == rPaired.TURN.Username {
+		t.Errorf("sender and receiver got the same credential: sender=%+v receiver=%+v", sPaired.TURN, rPaired.TURN)
 	}
 }
 

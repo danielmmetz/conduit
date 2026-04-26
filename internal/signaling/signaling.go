@@ -88,7 +88,11 @@ func WithJoinLimiter(l *ratelimit.KeyedLimiter) Option {
 }
 
 // WithTurnIssuer installs a TURN credential issuer. When set, the server
-// includes fresh credentials in every Reserved frame.
+// mints a fresh credential for each peer at pairing time and includes it
+// in that peer's Paired frame. Each peer must get its own credential —
+// Cloudflare (and TURN servers in general) bind a credential to a single
+// Allocate, so sharing one credential between the two peers in a pair
+// silently breaks relay candidate gathering for the second peer.
 func WithTurnIssuer(iss turnauth.Issuer) Option {
 	return func(s *Server) { s.turnIssuer = iss }
 }
@@ -212,8 +216,7 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 	defer sl.cancel()
 	defer s.removeSlot(sl.id)
 
-	reserved := wire.Reserved{Op: wire.OpReserved, Slot: sl.id, TURN: s.issueTURN(ctx, logger)}
-	if err := writeJSON(ctx, conn, reserved); err != nil {
+	if err := writeJSON(ctx, conn, wire.Reserved{Op: wire.OpReserved, Slot: sl.id}); err != nil {
 		return
 	}
 
@@ -241,13 +244,14 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 	}
 
 	// From here, both peers are attached. Announce pairing to each end, then
-	// release the receiver handler to start relaying. Fresh TURN credentials
-	// (when configured) are included so both peers can gather relay candidates.
-	paired := s.pairedCtl(ctx, logger)
-	if err := writeJSON(ctx, conn, paired); err != nil {
+	// release the receiver handler to start relaying. Each peer gets its own
+	// freshly-minted TURN credential (when configured): TURN servers bind a
+	// credential to one Allocate, so sharing one credential across both peers
+	// would break the second peer's relay gathering.
+	if err := writeJSON(ctx, conn, s.pairedCtl(ctx, logger)); err != nil {
 		return
 	}
-	if err := writeJSON(ctx, sl.receiverConn, paired); err != nil {
+	if err := writeJSON(ctx, sl.receiverConn, s.pairedCtl(ctx, logger)); err != nil {
 		return
 	}
 	close(sl.relayStart)
@@ -444,10 +448,11 @@ func (s *Server) pairedCtl(ctx context.Context, logger *slog.Logger) wire.Paired
 	return wire.Paired{Op: wire.OpPaired, TURN: s.issueTURN(ctx, logger)}
 }
 
-// issueTURN mints credentials for inclusion in a Reserved/Paired control
-// frame. Returns nil if no issuer is configured or if issuance failed; the
-// caller treats either as "no TURN advertised this round" so a transient
-// upstream blip doesn't break the whole signaling exchange.
+// issueTURN mints credentials for inclusion in a Paired control frame.
+// Returns nil if no issuer is configured or if issuance failed; the caller
+// treats either as "no TURN advertised this round" so a transient upstream
+// blip doesn't break the whole signaling exchange — peers can still pair
+// directly when both sides have non-symmetric NAT.
 func (s *Server) issueTURN(ctx context.Context, logger *slog.Logger) *wire.TurnCreds {
 	if s.turnIssuer == nil {
 		return nil
