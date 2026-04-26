@@ -52,23 +52,25 @@ The signaling server caches a credential per `--cloudflare-turn-ttl-seconds` (de
 
 ## CLI usage
 
+`--server` defaults to `https://conduit.danielmmetz.com`; pass `--server <URL>` (or set `CONDUIT_SERVER`) to point at a different rendezvous host.
+
 **Send** (prints a code; waits for the receiver):
 
 ```bash
-./conduit send --server 'http://localhost:8080' --text 'hello'
-./conduit send --server 'http://localhost:8080' ./myfile.bin
-./conduit send --server 'http://localhost:8080' ./mydir              # streams as tar
-./conduit send --server 'http://localhost:8080' a.txt b.txt c.txt    # multiple files → tar
-tar c ./mydir | ./conduit send --server 'http://localhost:8080' -    # stdin
+./conduit send --text 'hello'
+./conduit send ./myfile.bin
+./conduit send ./mydir              # streams as tar
+./conduit send a.txt b.txt c.txt    # multiple files → tar
+tar c ./mydir | ./conduit send -    # stdin
 ```
 
 **Receive**:
 
 ```bash
-./conduit recv --server 'http://localhost:8080' '42-word-word-word'
-./conduit recv --server 'http://localhost:8080' -o out.bin '42-word-word-word'
-./conduit recv --server 'http://localhost:8080' -o ./dest '42-word-word-word'  # dir/tar extracts here
-./conduit recv --server 'http://localhost:8080' '42-word-word-word' -          # write to stdout
+./conduit recv '42-word-word-word'
+./conduit recv -o out.bin '42-word-word-word'
+./conduit recv -o ./dest '42-word-word-word'  # dir/tar extracts here
+./conduit recv '42-word-word-word' -          # write to stdout
 ```
 
 Without `-o`, files land at the sender's filename and directories extract into the current working directory.

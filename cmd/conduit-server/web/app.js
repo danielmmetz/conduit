@@ -5,8 +5,17 @@
 
   const $ = (id) => document.getElementById(id);
 
+  // Hosted rendezvous service. When the page is served from this origin the
+  // Server field is hidden and the displayed CLI command omits --server, since
+  // the conduit binary's own default points here.
+  const DEFAULT_SERVER_URL = "https://conduit.danielmmetz.com";
+
   function defaultServerUrl() {
     return window.location.origin;
+  }
+
+  function isDefaultOrigin() {
+    return window.location.origin === DEFAULT_SERVER_URL;
   }
 
   function setStatus(el, text, kind) {
@@ -144,6 +153,9 @@
   }
 
   function recvCliCommand(server, code) {
+    if (server === DEFAULT_SERVER_URL) {
+      return "conduit recv " + code;
+    }
     return "conduit recv --server " + server + " " + code;
   }
 
@@ -211,6 +223,12 @@
   function wireUI(serviceWorkerDownloadOk) {
     const serverUrl = $("serverUrl");
     serverUrl.value = defaultServerUrl();
+    if (isDefaultOrigin()) {
+      const field = serverUrl.closest("label.field");
+      if (field) {
+        field.hidden = true;
+      }
+    }
 
     const dropzone = $("dropzone");
     const fileInput = $("fileInput");

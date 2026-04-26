@@ -23,6 +23,11 @@ import (
 	"github.com/peterbourgon/ff/v3/ffcli"
 )
 
+// defaultServerURL is the hosted rendezvous service. CLI defaults and the
+// "receive on the CLI" hint both use it; the hint omits --server when the
+// active URL matches, since the receiver's CLI default is the same.
+const defaultServerURL = "https://conduit.danielmmetz.com"
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -59,7 +64,7 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out io.Writer) *ffcli.Command
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text string
 	var noRelay, forceRelay bool
-	fs.StringVar(&server, "server", "http://localhost:8080", "signaling server base URL")
+	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&text, "text", "", "text payload to send instead of a file")
 	fs.BoolVar(&noRelay, "no-relay", false, "refuse TURN; fail rather than fall back to a relayed path")
 	fs.BoolVar(&forceRelay, "force-relay", false, "force TURN; gather only relay candidates (useful for exercising the relay)")
@@ -87,7 +92,7 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out io.Writer) *ffcli.Command
 				if page, err := receivePageURL(server, code); err == nil {
 					fmt.Fprintf(out, "receive in the browser: %s\n", page)
 				}
-				fmt.Fprintf(out, "receive on the CLI: conduit recv --server %s %s\n", server, code)
+				fmt.Fprintf(out, "receive on the CLI: %s\n", recvCLIHint(server, code))
 				fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
 			}, onProgress); err != nil {
 				return fmt.Errorf("running send: %w", err)
@@ -102,7 +107,7 @@ func recvCmd(logger *slog.Logger, out io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit recv", flag.ContinueOnError)
 	var server, outPath string
 	var noRelay, forceRelay bool
-	fs.StringVar(&server, "server", "http://localhost:8080", "signaling server base URL")
+	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&outPath, "o", "", "write the received payload to this path ('-' for stdout; default is the sender's filename for files or the working directory for directories)")
 	fs.BoolVar(&noRelay, "no-relay", false, "refuse TURN; fail rather than fall back to a relayed path")
 	fs.BoolVar(&forceRelay, "force-relay", false, "force TURN; gather only relay candidates (useful for exercising the relay)")
@@ -166,6 +171,16 @@ func openSource(text string, args []string, stdin io.Reader) (*xfer.Source, erro
 		return nil, fmt.Errorf("resolving send source: %w", err)
 	}
 	return src, nil
+}
+
+// recvCLIHint is the "conduit recv ..." command shown to the sender. The
+// --server flag is omitted when server matches the CLI's own default, so the
+// hint stays short for the common hosted case.
+func recvCLIHint(server, code string) string {
+	if server == defaultServerURL {
+		return fmt.Sprintf("conduit recv %s", code)
+	}
+	return fmt.Sprintf("conduit recv --server %s %s", server, code)
 }
 
 // receivePageURL is the web UI URL that pre-fills the code in the fragment (same host as --server).
