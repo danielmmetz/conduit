@@ -23,12 +23,12 @@ flow, matching webwormhole's mental model.
 | Dimension                | Choice                                                                                                  |
 | ------------------------ | ------------------------------------------------------------------------------------------------------- |
 | Direction model          | Two unidirectional data channels per session, one per direction                                         |
-| Concurrency              | Serialize transfers within a direction; allow concurrent across directions                              |
+| Concurrency              | Serialize within a direction; concurrent across directions, exposed in the UI (transfer list shows ↑ and ↓ rows in parallel) |
 | Session boundary         | New: explicit goodbye op. Until then: connection persists and slot survives                             |
 | Slot lifetime (server)   | Keep slot alive while either WebSocket is open; idle timeout matches v1 (10 min)                        |
 | Wire teardown            | Move `exchangeTeardown` from per-transfer to session-close; per-transfer ends with tagEOF + ack drain only |
 | Framing tags             | Unchanged: tagData / tagEOF / tagAck. Each transfer is preamble → tagData* → tagEOF + ack drain         |
-| CLI default              | One-shot stays default (`send`, `recv` unchanged). New `conduit session [code]` enters session mode     |
+| CLI default              | One-shot stays default (`send`, `recv` unchanged). New `conduit pipe [code]` for full-duplex stdin/stdout (mirrors `ww pipe`). No multi-file CLI session mode |
 | Web default              | Session mode (always)                                                                                   |
 
 ## Mental model
@@ -146,20 +146,21 @@ transfers.
 ## CLI ergonomics
 
 ```
-conduit send <path>           # unchanged: one-shot, exits after transfer
-conduit recv <code>           # unchanged: one-shot, exits after transfer
+conduit send <path>     # unchanged: one-shot, exits after transfer
+conduit recv <code>     # unchanged: one-shot, exits after transfer
 
-conduit session               # create session, print code, REPL stdin
-conduit session <code>        # join session, REPL stdin
+conduit pipe            # create session, print code, full-duplex stdin/stdout
+conduit pipe <code>     # join session, full-duplex stdin/stdout
 ```
 
-REPL mode: each line is a path to push. Empty line = wait. `Ctrl+D` = send
-`OpSessionClose`. Incoming transfers are written to CWD with progress on
-stderr.
+`pipe` is stream-oriented, not transfer-oriented: stdin on each side
+becomes outbound bytes, inbound bytes go to stdout. Closes when either
+side closes stdin. Models `ww pipe` directly.
 
-This is workable but unusual for a Unix CLI; the alternative of a single
-session-mode flag (`conduit send --keep-open`) is simpler if the REPL turns
-out to feel awkward in practice. **Open question.**
+We deliberately do **not** add a multi-file session subcommand. ww didn't
+either — file transfers as a sequence of named blobs don't compose well
+with a stdin/stdout shell. Session mode for *files* lives in the web UI
+only. If a CLI use case for session-mode-files emerges, revisit.
 
 ## Web UX
 
@@ -174,26 +175,15 @@ labelled `↑` / `↓` matching webwormhole's convention.
 
 ## Risks / open questions
 
-- **`ackEG.Wait` semantics under interleaved transfers.** Per-transfer it
-  still drains correctly (one writer per DC means tagAck stream is
-  unambiguous). What's untested is concurrent transfers in opposite
-  directions — both directions running simultaneously means two ackEGs
-  alive at once, one per Session direction. Should be fine but warrants a
-  pion-level smoke test before relying on it.
-- **NAT / SCTP keepalive.** SCTP heartbeats keep ICE alive on an idle PC,
-  but a session with 30+ minutes of idle time may need application-level
-  pings on long-lived TURN paths. Defer; monitor.
-- **CLI REPL ergonomics.** May feel un-Unix. Alternative: drop the REPL,
-  ship `--keep-open` instead, and let the user re-invoke with new args.
-  Decide after a working web UX.
+- **`ackEG.Wait` semantics under concurrent opposite-direction transfers.**
+  Per-DC the invariant holds (one writer per tag class). What's untested is
+  two ackEGs alive simultaneously, one per Session direction. Should be
+  fine but warrants a pion-level smoke test before relying on it.
 - **Backwards compatibility.** A v1 client opening a session-mode peer
   must still work for one-shot. Path: keep the v1 wire ops fully working,
   treat `OpSessionClose` as optional (peers that don't send it just drop
   the connection v1-style). Session features are then opt-in by both peers
   agreeing to stay paired.
-- **Concurrent-transfer UX.** The transfer list can show two in-flight
-  rows, one each direction. Whether to *expose* concurrency or pretend
-  transfers are serialized is a UX decision; protocol allows both.
 
 ## Phased build
 
