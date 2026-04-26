@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/danielmmetz/conduit/internal/wire"
 	"github.com/pion/webrtc/v4"
@@ -347,10 +348,28 @@ func newPeerConnection(cfg Config) (*webrtc.PeerConnection, error) {
 	return pc, nil
 }
 
+// gatherDeadline bounds how long waitGather waits for ICE candidate gathering
+// to formally "complete" before proceeding with the SDP exchange. Cloudflare's
+// generate-ice-servers returns alternative endpoints (port 53, IPv6) intended
+// to bypass restrictive firewalls; on networks where those aren't reachable,
+// Chrome retries each one for ~40s before declaring gather complete. By that
+// point we already have every useful candidate (host <100ms, srflx <500ms,
+// relay <2s), so 3s is plenty of time to gather them and proceed without the
+// dead-end wait. Any candidates that gather later are not in the SDP we send;
+// proper trickle is the long-term fix and supersedes this deadline.
+const gatherDeadline = 3 * time.Second
+
+// waitGather blocks until ICE gathering completes, the deadline expires, or
+// ctx is canceled. The deadline-expiry path returns nil so the caller proceeds
+// with whatever candidates have already been gathered.
 func waitGather(ctx context.Context, pc *webrtc.PeerConnection) error {
 	done := webrtc.GatheringCompletePromise(pc)
+	timer := time.NewTimer(gatherDeadline)
+	defer timer.Stop()
 	select {
 	case <-done:
+		return nil
+	case <-timer.C:
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("ice gather: %w", ctx.Err())
