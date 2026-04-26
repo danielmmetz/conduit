@@ -262,7 +262,10 @@
     if (isDefaultOrigin()) {
       const field = serverUrl.closest("label.field");
       if (field) {
-        field.hidden = true;
+        // .field sets display:flex, which has the same specificity as the
+        // UA's [hidden]{display:none} rule and wins by ordering — so the
+        // hidden attribute alone leaves the field visible. Force it.
+        field.style.display = "none";
       }
     }
 
