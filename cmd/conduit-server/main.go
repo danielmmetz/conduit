@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	iofs "io/fs"
@@ -106,8 +108,21 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("embedding web assets: %w", err)
 	}
+	// embed.FS files all carry a zero modtime, so http.FileServer emits no
+	// Last-Modified or ETag and browsers fall back to heuristic caching that
+	// can outlive a deploy. Precompute a SHA-256 ETag per asset so
+	// http.ServeContent can answer If-None-Match cheaply, and pair it with
+	// Cache-Control: no-cache so the browser always revalidates.
+	etags, err := assetETags(webSub)
+	if err != nil {
+		return fmt.Errorf("hashing web assets: %w", err)
+	}
 	fileSrv := http.FileServer(http.FS(webSub))
 	static := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if etag, ok := etags[r.URL.Path]; ok {
+			w.Header().Set("Etag", etag)
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		if strings.HasSuffix(r.URL.Path, ".wasm") {
 			w.Header().Set("Content-Type", "application/wasm")
 		}
@@ -148,4 +163,34 @@ func mainE(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("shutting down: %w", shutdownErr)
 	}
 	return nil
+}
+
+// assetETags returns a map from URL request path to a strong ETag for each
+// embedded file. The map covers both "/path" and, for index.html, the bare
+// "/" so http.FileServer's directory-index lookup hits a precomputed entry.
+func assetETags(fsys iofs.FS) (map[string]string, error) {
+	etags := map[string]string{}
+	err := iofs.WalkDir(fsys, ".", func(p string, d iofs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("walking %q: %w", p, err)
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, err := iofs.ReadFile(fsys, p)
+		if err != nil {
+			return fmt.Errorf("reading %q: %w", p, err)
+		}
+		sum := sha256.Sum256(data)
+		etag := `"` + hex.EncodeToString(sum[:]) + `"`
+		etags["/"+p] = etag
+		if p == "index.html" {
+			etags["/"] = etag
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walking embedded assets: %w", err)
+	}
+	return etags, nil
 }
