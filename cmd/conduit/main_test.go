@@ -244,19 +244,114 @@ func TestRecvWatchMultipleSenders(t *testing.T) {
 	}
 }
 
-// TestRecvWatchRejectsPositionalCode confirms that --watch refuses the
-// usual positional code argument: in watch mode the host generates its
-// own code, accepting one passed in would silently be ignored.
-func TestRecvWatchRejectsPositionalCode(t *testing.T) {
+// TestRecvWatchJoinerMultiplePushes covers the joiner-mode of
+// `recv --watch <code>`: the receiver joins an existing slot and stays
+// paired across multiple transfers, exiting only when the peer
+// disconnects. Mirrors what the browser sender does — open a session,
+// push a few files, close the tab — but using the Go client to drive
+// the sender side directly.
+func TestRecvWatchJoinerMultiplePushes(t *testing.T) {
+	srv := signaling.NewServer(
+		slog.New(slog.NewTextHandler(t.Output(), nil)),
+		signaling.WithSlotTTL(2*time.Second),
+		signaling.WithHelloTimeout(2*time.Second),
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /ws", srv.HandleWS)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
+
+	dir := t.TempDir()
+	codeCh := make(chan string, 1)
+	senderDone := make(chan error, 1)
+
+	// Sender side: reserve a non-persistent slot (the way the browser
+	// does today), block in OpenSender until the CLI joins, then push
+	// two transfers in the same pairing and close.
+	go func() {
+		sess, err := client.OpenSender(ctx, logger, ts.URL, client.RelayAuto, func(code string) {
+			codeCh <- code
+		}, nil)
+		if err != nil {
+			senderDone <- err
+			return
+		}
+		defer sess.Close(ctx)
+		for i := range 2 {
+			payload := fmt.Appendf(nil, "transfer %d\n", i)
+			pre := wire.Preamble{
+				Kind: wire.PreambleKindFile,
+				Name: fmt.Sprintf("transfer-%d.bin", i),
+				Size: int64(len(payload)),
+				MIME: "application/octet-stream",
+			}
+			if err := sess.Push(ctx, pre, bytes.NewReader(payload)); err != nil {
+				senderDone <- err
+				return
+			}
+		}
+		senderDone <- nil
+	}()
+
+	var code string
+	select {
+	case c := <-codeCh:
+		code = c
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for code")
+	}
+
+	// CLI: join via --watch and stay paired until the sender closes.
+	recvDone := make(chan error, 1)
+	go func() {
+		recvDone <- mainE(ctx, logger, nil, io.Discard, io.Discard,
+			[]string{"recv", "--server", ts.URL, "--watch", "-o", dir, code})
+	}()
+
+	if err := <-senderDone; err != nil {
+		t.Fatalf("sender: %v", err)
+	}
+	// Sender's defer sess.Close runs as the goroutine exits; the
+	// receiver's pump should see EOF and the watch loop returns.
+	select {
+	case err := <-recvDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("recv --watch returned %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recv --watch did not exit after sender close")
+	}
+
+	for i := range 2 {
+		name := fmt.Sprintf("transfer-%d.bin", i)
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Errorf("transfer %d readfile: %v", i, err)
+			continue
+		}
+		want := fmt.Appendf(nil, "transfer %d\n", i)
+		if !bytes.Equal(got, want) {
+			t.Errorf("transfer %d: got %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestRecvWatchRejectsTooManyArgs confirms --watch refuses extra
+// positional arguments past the optional code.
+func TestRecvWatchRejectsTooManyArgs(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 	err := mainE(t.Context(), logger, nil, io.Discard, io.Discard,
-		[]string{"recv", "--watch", "42-foo-bar-baz"})
+		[]string{"recv", "--watch", "42-foo-bar-baz", "extra"})
 	if err == nil {
-		t.Fatal("recv --watch <code> returned nil, want error")
+		t.Fatal("recv --watch <code> extra returned nil, want error")
 	}
-	if !strings.Contains(err.Error(), "positional") {
-		t.Errorf("error %q does not mention the positional argument", err)
+	if !strings.Contains(err.Error(), "usage") {
+		t.Errorf("error %q does not mention usage", err)
 	}
 }
 

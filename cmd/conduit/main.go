@@ -127,13 +127,13 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&outPath, "o", "", "write the received payload to this path ('-' for stdout; default is the sender's filename for files or the working directory for directories)")
-	fs.BoolVar(&watch, "watch", false, "reserve a stable code and accept transfers from successive senders until ctrl-c (in --watch mode the sender connects with the printed code; -o must be empty or a directory)")
-	fs.BoolVar(&showQR, "qr", false, "in --watch mode, render a QR of the browser URL for scanning from a phone after printing the code")
+	fs.BoolVar(&watch, "watch", false, "stay open across multiple transfers; without a code the receiver hosts a stable persistent slot, with a code it joins and stays paired through the peer's session (-o must be empty or a directory in either mode)")
+	fs.BoolVar(&showQR, "qr", false, "in --watch host mode, render a QR of the browser URL for scanning from a phone after printing the code")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "recv",
-		ShortUsage: "conduit recv <code> [-o PATH | -] [--server URL]\n       conduit recv --watch [-o DIR] [--server URL]",
-		ShortHelp:  "Join a slot and receive a payload, or with --watch host a stable code for repeated receives.",
+		ShortUsage: "conduit recv <code> [-o PATH | -] [--server URL]\n       conduit recv --watch [<code>] [-o DIR] [--server URL]",
+		ShortHelp:  "Receive a payload (one-shot), or with --watch keep the connection open: hosts a stable code with no positional, joins through one with a code.",
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
@@ -219,36 +219,101 @@ func runRecvOnce(ctx context.Context, logger *slog.Logger, server string, policy
 	}
 }
 
-// runRecvWatch reserves a persistent slot once, prints a stable code, and
-// accepts transfers from successive senders until ctx is cancelled. Within
-// each pairing the peer may push multiple transfers (e.g. the browser
-// sender dropping several files in one session); the loop advances to the
-// next sender when the peer disconnects.
+// runRecvWatch dispatches to host or joiner mode based on whether a
+// positional code was supplied:
 //
-// Files land in outPath (defaulting to the current directory) under their
-// preamble-supplied filename; tar streams extract there; text writes to
-// stdout. -o must therefore be empty or an existing directory.
+//   - no code → host mode: reserve a persistent slot, print a stable
+//     code, accept transfers from successive senders.
+//   - one code → joiner mode: join an existing slot and stay paired,
+//     accepting every transfer the peer pushes until they disconnect.
+//
+// Both modes write into outPath (defaulting to cwd), which must be a
+// directory; per-transfer files land under their preamble-supplied
+// filename, tar streams extract there, text payloads go to stdout.
 func runRecvWatch(ctx context.Context, logger *slog.Logger, server string, policy client.RelayPolicy, outPath string, showQR bool, args []string, out, stderr io.Writer) error {
-	if len(args) > 0 {
-		return fmt.Errorf("running recv --watch: a positional code is not accepted (the host generates its own code)")
-	}
-	dir := outPath
-	if dir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("running recv --watch: %w", err)
-		}
-		dir = cwd
-	} else {
-		info, err := os.Stat(dir)
-		if err != nil {
-			return fmt.Errorf("running recv --watch: -o %q: %w", outPath, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("running recv --watch: -o %q is not a directory", outPath)
-		}
+	dir, err := resolveWatchDir(outPath)
+	if err != nil {
+		return fmt.Errorf("running recv --watch: %w", err)
 	}
 
+	switch len(args) {
+	case 0:
+		return runRecvWatchHost(ctx, logger, server, policy, dir, showQR, out, stderr)
+	case 1:
+		return runRecvWatchJoiner(ctx, logger, server, policy, args[0], dir, out, stderr)
+	default:
+		return fmt.Errorf("usage: conduit recv --watch [<code>]")
+	}
+}
+
+// resolveWatchDir validates outPath as the watch destination directory.
+// Empty falls back to the working directory; a non-empty value must
+// exist and be a directory (we drop multiple files into it under their
+// preamble names — using a regular file would silently overwrite each
+// previous transfer).
+func resolveWatchDir(outPath string) (string, error) {
+	if outPath == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("getwd: %w", err)
+		}
+		return cwd, nil
+	}
+	info, err := os.Stat(outPath)
+	if err != nil {
+		return "", fmt.Errorf("-o %q: %w", outPath, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("-o %q is not a directory", outPath)
+	}
+	return outPath, nil
+}
+
+// runRecvWatchJoiner joins the slot encoded by codeStr and stays paired
+// across multiple transfers within that one pairing — the within-pairing
+// reuse that web↔web has always had, just exposed through `recv` as
+// well. The loop ends when the peer's session pump exits (clean EOF on
+// disconnect) or ctx is cancelled.
+//
+// Unlike host mode this requires no server-side persistence: the
+// existing rtc.Session multiplexes transfers on a single data channel,
+// so as long as the peer keeps the WebSocket alive the receiver can
+// keep consuming preambles.
+func runRecvWatchJoiner(ctx context.Context, logger *slog.Logger, server string, policy client.RelayPolicy, codeStr, dir string, out, stderr io.Writer) error {
+	code, err := wire.ParseCode(codeStr)
+	if err != nil {
+		return fmt.Errorf("running recv --watch: %w", err)
+	}
+	if len(code.Words) == 0 {
+		return fmt.Errorf("running recv --watch: code %q is missing the word portion", codeStr)
+	}
+	sess, err := client.OpenReceiver(ctx, logger, server, code, policy, makeWatchSinkOpener(dir, out, stderr))
+	if err != nil {
+		return fmt.Errorf("running recv --watch: %w", err)
+	}
+	defer sess.Close(ctx)
+	fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
+	fmt.Fprintln(out, "watch mode: receiving until peer disconnects (ctrl-c to stop)")
+
+	pumpDone := make(chan error, 1)
+	go func() { pumpDone <- sess.PumpErr() }()
+	select {
+	case pumpErr := <-pumpDone:
+		if pumpErr != nil && !errors.Is(pumpErr, io.EOF) && !errors.Is(pumpErr, context.Canceled) {
+			return fmt.Errorf("running recv --watch: %w", pumpErr)
+		}
+		return nil
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+// runRecvWatchHost reserves a persistent slot once, prints a stable
+// code, and accepts transfers from successive senders until ctx is
+// cancelled. Within each pairing the peer may push multiple transfers
+// (e.g. the browser sender dropping several files); the loop advances
+// to the next sender when the peer disconnects.
+func runRecvWatchHost(ctx context.Context, logger *slog.Logger, server string, policy client.RelayPolicy, dir string, showQR bool, out, stderr io.Writer) error {
 	var codeOnce sync.Once
 	onCode := func(code string) {
 		codeOnce.Do(func() {
