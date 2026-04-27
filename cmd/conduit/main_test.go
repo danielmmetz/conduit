@@ -19,6 +19,7 @@ import (
 
 	"github.com/danielmmetz/conduit/internal/client"
 	"github.com/danielmmetz/conduit/internal/signaling"
+	"github.com/danielmmetz/conduit/internal/wire"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -144,12 +145,14 @@ func TestSendRecvFileRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSendWatchTwoReceivers exercises the --watch loop with a stable
-// (server-side persistent) code: one sender process reserves the slot
-// once, prints one code, and accepts two distinct receivers in sequence
-// using that same code. Cancelling the context unblocks the third Accept
-// so the sender returns cleanly.
-func TestSendWatchTwoReceivers(t *testing.T) {
+// TestRecvWatchMultipleSenders exercises the --watch host loop: one
+// receiver reserves a persistent slot, prints one stable code, and lands
+// payloads from two sequential senders in the watch directory. The
+// senders drive the joiner side via client.OpenReceiver — that's what
+// the browser sender does in the motivating workflow (WASM's
+// session-mode openReceiver joins a slot and pushes via the resulting
+// Session).
+func TestRecvWatchMultipleSenders(t *testing.T) {
 	srv := signaling.NewServer(
 		slog.New(slog.NewTextHandler(t.Output(), nil)),
 		signaling.WithSlotTTL(2*time.Second),
@@ -164,82 +167,96 @@ func TestSendWatchTwoReceivers(t *testing.T) {
 	defer cancel()
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
 
-	const want = "hello watchers"
-
+	dir := t.TempDir()
 	codeCh := make(chan string, 4)
-	var sendBuf syncBuffer
-	sendOut := &codeWatchBuffer{buf: &sendBuf, ch: codeCh}
+	var recvBuf syncBuffer
+	recvOut := &codeWatchBuffer{buf: &recvBuf, ch: codeCh}
 
-	sendDone := make(chan error, 1)
+	recvDone := make(chan error, 1)
 	go func() {
-		sendDone <- mainE(ctx, logger, nil, sendOut, io.Discard,
-			[]string{"send", "--server", ts.URL, "--watch", "--text", want})
+		recvDone <- mainE(ctx, logger, nil, recvOut, io.Discard,
+			[]string{"recv", "--server", ts.URL, "--watch", "-o", dir})
 		close(codeCh)
 	}()
 
-	// The persistent code is printed exactly once; capture it and reuse it
-	// for both receivers. If the second receiver's code differed, --watch
-	// would have regressed back to rotating slots.
-	var firstCode string
+	var hostCode string
 	select {
 	case code, ok := <-codeCh:
 		if !ok {
-			t.Fatalf("sender exited before code was available (out=%q)", sendBuf.String())
+			t.Fatalf("recv --watch exited before code was available (out=%q)", recvBuf.String())
 		}
-		firstCode = code
+		hostCode = code
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for code")
 	}
+	parsed, err := wire.ParseCode(hostCode)
+	if err != nil {
+		t.Fatalf("parse code %q: %v", hostCode, err)
+	}
 
 	for i := range 2 {
-		var recvBuf syncBuffer
-		if err := mainE(ctx, logger, nil, &recvBuf, io.Discard,
-			[]string{"recv", "--server", ts.URL, firstCode}); err != nil {
-			t.Fatalf("receiver %d: %v", i, err)
+		payload := fmt.Appendf(nil, "payload from sender %d\n", i)
+		name := fmt.Sprintf("sender-%d.bin", i)
+		sess, err := client.OpenReceiver(ctx, logger, ts.URL, parsed, client.RelayAuto, nil)
+		if err != nil {
+			t.Fatalf("sender %d open: %v", i, err)
 		}
-		if got := strings.TrimSpace(recvBuf.String()); got != want {
-			t.Errorf("receiver %d output = %q, want %q", i, got, want)
+		pre := wire.Preamble{
+			Kind: wire.PreambleKindFile,
+			Name: name,
+			Size: int64(len(payload)),
+			MIME: "application/octet-stream",
+		}
+		if err := sess.Push(ctx, pre, bytes.NewReader(payload)); err != nil {
+			sess.Close(ctx)
+			t.Fatalf("sender %d push: %v", i, err)
+		}
+		if err := sess.Close(ctx); err != nil {
+			t.Fatalf("sender %d close: %v", i, err)
+		}
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("sender %d readfile: %v", i, err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Errorf("sender %d roundtrip: got %q, want %q", i, got, payload)
 		}
 	}
 
-	// No further codes should have been emitted; the watch loop reuses one
-	// stable code across receivers.
+	// No further host codes should have been emitted; the watch loop
+	// reuses one stable code across senders.
 	select {
 	case extra, ok := <-codeCh:
 		if ok {
-			t.Errorf("extra code emitted by --watch: %q (codes should be stable)", extra)
+			t.Errorf("extra code emitted: %q (codes should be stable)", extra)
 		}
 	default:
 	}
 
-	// Cancel so the sender's pending Accept unblocks. mainE reports
-	// context.Canceled by returning the cancel error; that's not a failure
-	// for --watch — it's how the user exits.
 	cancel()
 	select {
-	case err := <-sendDone:
+	case err := <-recvDone:
 		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("send --watch returned %v", err)
+			t.Fatalf("recv --watch returned %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatalf("send --watch did not exit after cancel (out=%q)", sendBuf.String())
+		t.Fatalf("recv --watch did not exit after cancel (out=%q)", recvBuf.String())
 	}
 }
 
-// TestSendWatchRejectsStdin verifies that --watch refuses to pair with a
-// stdin source. Stdin is a single-shot stream; replaying it across watch
-// iterations would silently truncate the second receiver to zero bytes, so
-// the CLI fails fast instead.
-func TestSendWatchRejectsStdin(t *testing.T) {
+// TestRecvWatchRejectsPositionalCode confirms that --watch refuses the
+// usual positional code argument: in watch mode the host generates its
+// own code, accepting one passed in would silently be ignored.
+func TestRecvWatchRejectsPositionalCode(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	err := mainE(t.Context(), logger, strings.NewReader(""), io.Discard, io.Discard,
-		[]string{"send", "--watch", "-"})
+	err := mainE(t.Context(), logger, nil, io.Discard, io.Discard,
+		[]string{"recv", "--watch", "42-foo-bar-baz"})
 	if err == nil {
-		t.Fatal("send --watch - returned nil, want error")
+		t.Fatal("recv --watch <code> returned nil, want error")
 	}
-	if !strings.Contains(err.Error(), "stdin") {
-		t.Errorf("error %q does not mention stdin", err)
+	if !strings.Contains(err.Error(), "positional") {
+		t.Errorf("error %q does not mention the positional argument", err)
 	}
 }
 

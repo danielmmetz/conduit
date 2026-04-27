@@ -68,13 +68,12 @@ func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out, stder
 func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text string
-	var showQR, git, watch bool
+	var showQR, git bool
 	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&text, "text", "", "text payload to send instead of a file")
 	fs.BoolVar(&showQR, "qr", false, "after printing the code, render a QR of the browser URL for scanning from a phone")
 	fs.BoolVar(&git, "git", true, "for directory sends, honor a root .gitignore and skip .git/; --git=false sends the tree verbatim")
-	fs.BoolVar(&watch, "watch", false, "after each receive, reserve a fresh slot and wait for another receiver until ctrl-c (each receiver gets a new code; not compatible with stdin)")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "send",
@@ -83,33 +82,181 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
-			if watch && len(args) == 1 && args[0] == xfer.StdinMarker {
-				return fmt.Errorf("running send: --watch cannot be used with a stdin source (cannot replay)")
+			src, err := openSource(text, args, stdin, git)
+			if err != nil {
+				return fmt.Errorf("running send: %w", err)
 			}
-			if watch {
-				return runSendWatch(ctx, logger, server, policy, text, args, stdin, git, showQR, out, stderr)
+			defer src.Close()
+			pr := newProgressLine(stderr, "↑")
+			defer pr.Done()
+			onCode := func(code string) {
+				fmt.Fprintf(out, "code: %s\n", code)
+				page, pageErr := receivePageURL(server, code)
+				if pageErr == nil {
+					fmt.Fprintf(out, "receive in the browser: %s\n", page)
+				}
+				fmt.Fprintf(out, "receive on the CLI: %s\n", recvCLIHint(server, code))
+				if showQR && pageErr == nil {
+					if err := renderQR(out, page); err != nil {
+						fmt.Fprintf(stderr, "qr render failed: %v\n", err)
+					}
+				}
+				fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
 			}
-			return runSendOnce(ctx, logger, server, policy, text, args, stdin, git, showQR, out, stderr)
+			sess, err := client.OpenSender(ctx, logger, server, policy, onCode, nil)
+			if err != nil {
+				return fmt.Errorf("running send: %w", err)
+			}
+			defer sess.Close(ctx)
+			fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
+			pr.Update(0, src.Preamble.Size)
+			if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
+				return fmt.Errorf("running send: %w", err)
+			}
+			pr.Update(src.Preamble.Size, src.Preamble.Size)
+			pr.Finish(" ✓")
+			return nil
 		},
 	}
 }
 
-// runSendWatch reserves a persistent slot once, prints the stable code, and
-// then accepts successive receivers in a loop until ctx is cancelled. Each
-// pairing rebuilds the source so paths are re-read and tar streams are
-// re-spun. The slot stays alive across pairings — receivers all use the
-// same code — so the user can hand the code out once and re-run the
-// receive command as many times as they like.
-func runSendWatch(ctx context.Context, logger *slog.Logger, server string, policy client.RelayPolicy, text string, args []string, stdin io.Reader, git, showQR bool, out, stderr io.Writer) error {
+func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
+	fs := flag.NewFlagSet("conduit recv", flag.ContinueOnError)
+	var server, outPath string
+	var watch, showQR bool
+	var policy client.RelayPolicy
+	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
+	fs.StringVar(&outPath, "o", "", "write the received payload to this path ('-' for stdout; default is the sender's filename for files or the working directory for directories)")
+	fs.BoolVar(&watch, "watch", false, "reserve a stable code and accept transfers from successive senders until ctrl-c (in --watch mode the sender connects with the printed code; -o must be empty or a directory)")
+	fs.BoolVar(&showQR, "qr", false, "in --watch mode, render a QR of the browser URL for scanning from a phone after printing the code")
+	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
+	return &ffcli.Command{
+		Name:       "recv",
+		ShortUsage: "conduit recv <code> [-o PATH | -] [--server URL]\n       conduit recv --watch [-o DIR] [--server URL]",
+		ShortHelp:  "Join a slot and receive a payload, or with --watch host a stable code for repeated receives.",
+		FlagSet:    fs,
+		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
+		Exec: func(ctx context.Context, args []string) error {
+			if watch {
+				return runRecvWatch(ctx, logger, server, policy, outPath, showQR, args, out, stderr)
+			}
+			return runRecvOnce(ctx, logger, server, policy, outPath, args, out, stderr)
+		},
+	}
+}
+
+// runRecvOnce is the original one-shot recv flow: join the supplied slot,
+// receive one payload, exit.
+func runRecvOnce(ctx context.Context, logger *slog.Logger, server string, policy client.RelayPolicy, outPath string, args []string, out, stderr io.Writer) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: conduit recv <code> [-]")
+	}
+	code, err := wire.ParseCode(args[0])
+	if err != nil {
+		return fmt.Errorf("running recv: %w", err)
+	}
+	if len(code.Words) == 0 {
+		return fmt.Errorf("parsing recv code: %q is missing the word portion", args[0])
+	}
+	// Positional "-" after the code is shorthand for "-o -".
+	sinkOutPath := outPath
+	if len(args) == 2 && args[1] == xfer.StdoutMarker {
+		if sinkOutPath != "" && sinkOutPath != xfer.StdoutMarker {
+			return fmt.Errorf("running recv: positional %q conflicts with -o %q", xfer.StdoutMarker, sinkOutPath)
+		}
+		sinkOutPath = xfer.StdoutMarker
+	} else if len(args) > 1 {
+		return fmt.Errorf("usage: conduit recv <code> [-]")
+	}
+	opts := xfer.SinkOptions{OutPath: sinkOutPath, Stdout: out}
+	pr := newProgressLine(stderr, "↓")
+	defer pr.Done()
+	done := make(chan error, 1)
+	var writtenAnnounce string
+	open := func(pre wire.Preamble) (io.WriteCloser, error) {
+		sink, err := xfer.OpenSink(pre, opts)
+		if err != nil {
+			done <- err
+			return nil, err
+		}
+		// Skip progress when the sink writes to stdout — the progress
+		// line uses \r and would overwrite the payload the user is
+		// trying to read. Disk-bound transfers still get the meter.
+		toStdout := sinkWritesToStdout(pre, sinkOutPath)
+		var cb func(int64)
+		if !toStdout {
+			totalSize := pre.Size
+			cb = func(received int64) { pr.Update(received, totalSize) }
+			writtenAnnounce = sinkAnnounceName(pre, sinkOutPath)
+		}
+		return &finalizingSink{
+			w:  sink,
+			cb: cb,
+			onClose: func() error {
+				done <- nil
+				return nil
+			},
+		}, nil
+	}
+	sess, err := client.OpenReceiver(ctx, logger, server, code, policy, open)
+	if err != nil {
+		return fmt.Errorf("running recv: %w", err)
+	}
+	defer sess.Close(ctx)
+	fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("running recv: %w", err)
+		}
+		pr.Finish(" ✓")
+		if writtenAnnounce != "" {
+			fmt.Fprintf(out, "wrote %s\n", writtenAnnounce)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// runRecvWatch reserves a persistent slot once, prints a stable code, and
+// accepts transfers from successive senders until ctx is cancelled. Within
+// each pairing the peer may push multiple transfers (e.g. the browser
+// sender dropping several files in one session); the loop advances to the
+// next sender when the peer disconnects.
+//
+// Files land in outPath (defaulting to the current directory) under their
+// preamble-supplied filename; tar streams extract there; text writes to
+// stdout. -o must therefore be empty or an existing directory.
+func runRecvWatch(ctx context.Context, logger *slog.Logger, server string, policy client.RelayPolicy, outPath string, showQR bool, args []string, out, stderr io.Writer) error {
+	if len(args) > 0 {
+		return fmt.Errorf("running recv --watch: a positional code is not accepted (the host generates its own code)")
+	}
+	dir := outPath
+	if dir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("running recv --watch: %w", err)
+		}
+		dir = cwd
+	} else {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return fmt.Errorf("running recv --watch: -o %q: %w", outPath, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("running recv --watch: -o %q is not a directory", outPath)
+		}
+	}
+
 	var codeOnce sync.Once
 	onCode := func(code string) {
 		codeOnce.Do(func() {
 			fmt.Fprintf(out, "code: %s\n", code)
 			page, pageErr := receivePageURL(server, code)
 			if pageErr == nil {
-				fmt.Fprintf(out, "receive in the browser: %s\n", page)
+				fmt.Fprintf(out, "send from the browser: %s\n", page)
 			}
-			fmt.Fprintf(out, "receive on the CLI: %s\n", recvCLIHint(server, code))
 			if showQR && pageErr == nil {
 				if err := renderQR(out, page); err != nil {
 					fmt.Fprintf(stderr, "qr render failed: %v\n", err)
@@ -118,178 +265,130 @@ func runSendWatch(ctx context.Context, logger *slog.Logger, server string, polic
 			fmt.Fprintln(out, "watch mode: code stays valid for repeated receives until ctrl-c")
 		})
 	}
-	ps, err := client.OpenSenderPersistent(ctx, logger, server, policy, onCode)
+	host, err := client.OpenHost(ctx, logger, server, policy, onCode)
 	if err != nil {
-		return fmt.Errorf("running send: %w", err)
+		return fmt.Errorf("running recv --watch: %w", err)
 	}
-	defer ps.Close()
-	for {
-		fmt.Fprintln(out, "waiting for receiver...")
-		sess, err := ps.Accept(ctx, nil)
+	defer host.Close()
+
+	for ctx.Err() == nil {
+		fmt.Fprintln(out, "waiting for sender...")
+		sess, err := host.Accept(ctx, makeWatchSinkOpener(dir, out, stderr))
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
-			return fmt.Errorf("running send: %w", err)
+			return fmt.Errorf("running recv --watch: %w", err)
 		}
-		if err := pushOneViaSession(ctx, sess, text, args, stdin, git, stderr); err != nil {
+		fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
+		// Wait for the peer to disconnect (pump exits on EOF) or for
+		// the user to ctrl-c. PumpErr blocks on the same goroutine
+		// that drives inbound transfer dispatch, so by the time it
+		// returns every transfer the peer pushed has run to its sink's
+		// Close.
+		pumpDone := make(chan error, 1)
+		go func() { pumpDone <- sess.PumpErr() }()
+		select {
+		case pumpErr := <-pumpDone:
 			sess.Close(ctx)
-			return fmt.Errorf("running send: %w", err)
-		}
-		sess.Close(ctx)
-		if ctx.Err() != nil {
+			if pumpErr != nil && !errors.Is(pumpErr, io.EOF) && !errors.Is(pumpErr, context.Canceled) {
+				return fmt.Errorf("running recv --watch: %w", pumpErr)
+			}
+		case <-ctx.Done():
+			sess.Close(ctx)
 			return nil
 		}
 	}
-}
-
-// pushOneViaSession opens the source, reports route + progress on stderr,
-// pushes one full transfer, and returns. Used by the watch loop's per-
-// receiver iteration.
-func pushOneViaSession(ctx context.Context, sess *client.Session, text string, args []string, stdin io.Reader, git bool, stderr io.Writer) error {
-	src, err := openSource(text, args, stdin, git)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	pr := newProgressLine(stderr, "↑")
-	defer pr.Done()
-	fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
-	pr.Update(0, src.Preamble.Size)
-	if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
-		return err
-	}
-	pr.Update(src.Preamble.Size, src.Preamble.Size)
-	pr.Finish(" ✓")
 	return nil
 }
 
-// runSendOnce performs one full reserve → pair → push → close cycle. The
-// non-watch path calls it once; --watch uses runSendWatch instead so the
-// slot/code stay stable across receivers.
-func runSendOnce(ctx context.Context, logger *slog.Logger, server string, policy client.RelayPolicy, text string, args []string, stdin io.Reader, git, showQR bool, out, stderr io.Writer) error {
-	src, err := openSource(text, args, stdin, git)
-	if err != nil {
-		return fmt.Errorf("running send: %w", err)
-	}
-	defer src.Close()
-	pr := newProgressLine(stderr, "↑")
-	defer pr.Done()
-	onCode := func(code string) {
-		fmt.Fprintf(out, "code: %s\n", code)
-		page, pageErr := receivePageURL(server, code)
-		if pageErr == nil {
-			fmt.Fprintf(out, "receive in the browser: %s\n", page)
+// makeWatchSinkOpener builds a SinkOpener that drops each inbound transfer
+// into dir, prints a per-transfer progress line, and announces "wrote
+// <name>" on completion. Tar streams extract under dir; text payloads go
+// to stdout (matching the one-shot recv default). Multiple invocations
+// per session are expected — one per transfer the peer pushes.
+func makeWatchSinkOpener(dir string, out, stderr io.Writer) client.SinkOpener {
+	return func(pre wire.Preamble) (io.WriteCloser, error) {
+		sinkOutPath := watchSinkOutPath(pre, dir)
+		opts := xfer.SinkOptions{OutPath: sinkOutPath, Stdout: out}
+		sink, err := xfer.OpenSink(pre, opts)
+		if err != nil {
+			return nil, fmt.Errorf("opening sink: %w", err)
 		}
-		fmt.Fprintf(out, "receive on the CLI: %s\n", recvCLIHint(server, code))
-		if showQR && pageErr == nil {
-			if err := renderQR(out, page); err != nil {
-				fmt.Fprintf(stderr, "qr render failed: %v\n", err)
-			}
+		toStdout := sinkWritesToStdout(pre, sinkOutPath)
+		pr := newProgressLine(stderr, "↓")
+		var cb func(int64)
+		var announce string
+		if !toStdout {
+			totalSize := pre.Size
+			cb = func(received int64) { pr.Update(received, totalSize) }
+			announce = sinkAnnounceName(pre, sinkOutPath)
 		}
-		fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
+		return &watchSink{
+			w:        sink,
+			cb:       cb,
+			pr:       pr,
+			toStdout: toStdout,
+			announce: announce,
+			out:      out,
+		}, nil
 	}
-	sess, err := client.OpenSender(ctx, logger, server, policy, onCode, nil)
-	if err != nil {
-		return fmt.Errorf("running send: %w", err)
-	}
-	defer sess.Close(ctx)
-	fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
-	pr.Update(0, src.Preamble.Size)
-	if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
-		return fmt.Errorf("running send: %w", err)
-	}
-	pr.Update(src.Preamble.Size, src.Preamble.Size)
-	pr.Finish(" ✓")
-	return nil
 }
 
-func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
-	fs := flag.NewFlagSet("conduit recv", flag.ContinueOnError)
-	var server, outPath string
-	var policy client.RelayPolicy
-	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
-	fs.StringVar(&outPath, "o", "", "write the received payload to this path ('-' for stdout; default is the sender's filename for files or the working directory for directories)")
-	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
-	return &ffcli.Command{
-		Name:       "recv",
-		ShortUsage: "conduit recv <code> [-o PATH | -] [--server URL]",
-		ShortHelp:  "Join a slot and receive a payload from the sender.",
-		FlagSet:    fs,
-		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
-		Exec: func(ctx context.Context, args []string) error {
-			if len(args) < 1 {
-				return fmt.Errorf("usage: conduit recv <code> [-]")
-			}
-			code, err := wire.ParseCode(args[0])
-			if err != nil {
-				return fmt.Errorf("running recv: %w", err)
-			}
-			if len(code.Words) == 0 {
-				return fmt.Errorf("parsing recv code: %q is missing the word portion", args[0])
-			}
-			// Positional "-" after the code is shorthand for "-o -".
-			sinkOutPath := outPath
-			if len(args) == 2 && args[1] == xfer.StdoutMarker {
-				if sinkOutPath != "" && sinkOutPath != xfer.StdoutMarker {
-					return fmt.Errorf("running recv: positional %q conflicts with -o %q", xfer.StdoutMarker, sinkOutPath)
-				}
-				sinkOutPath = xfer.StdoutMarker
-			} else if len(args) > 1 {
-				return fmt.Errorf("usage: conduit recv <code> [-]")
-			}
-			opts := xfer.SinkOptions{OutPath: sinkOutPath, Stdout: out}
-			pr := newProgressLine(stderr, "↓")
-			defer pr.Done()
-			done := make(chan error, 1)
-			var writtenAnnounce string
-			open := func(pre wire.Preamble) (io.WriteCloser, error) {
-				sink, err := xfer.OpenSink(pre, opts)
-				if err != nil {
-					done <- err
-					return nil, err
-				}
-				// Skip progress when the sink writes to stdout — the
-				// progress line uses \r and would overwrite the payload
-				// the user is trying to read. Disk-bound transfers still
-				// get the progress meter and a final ✓.
-				toStdout := sinkWritesToStdout(pre, sinkOutPath)
-				var cb func(int64)
-				if !toStdout {
-					totalSize := pre.Size
-					cb = func(received int64) { pr.Update(received, totalSize) }
-					writtenAnnounce = sinkAnnounceName(pre, sinkOutPath)
-				}
-				return &finalizingSink{
-					w:  sink,
-					cb: cb,
-					onClose: func() error {
-						done <- nil
-						return nil
-					},
-				}, nil
-			}
-			sess, err := client.OpenReceiver(ctx, logger, server, code, policy, open)
-			if err != nil {
-				return fmt.Errorf("running recv: %w", err)
-			}
-			defer sess.Close(ctx)
-			fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
-			select {
-			case err := <-done:
-				if err != nil {
-					return fmt.Errorf("running recv: %w", err)
-				}
-				pr.Finish(" ✓")
-				if writtenAnnounce != "" {
-					fmt.Fprintf(out, "wrote %s\n", writtenAnnounce)
-				}
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		},
+// watchSinkOutPath maps a preamble to the OpenSink OutPath argument when
+// the watch loop's user-facing root is a directory: regular files become
+// "<dir>/<basename>", tar streams use the dir directly (OpenSink extracts
+// into it), and text uses "" so OpenSink falls through to stdout.
+func watchSinkOutPath(pre wire.Preamble, dir string) string {
+	switch pre.Kind {
+	case wire.PreambleKindFile:
+		name := filepath.Base(pre.Name)
+		if name == "" || name == "." || name == "/" {
+			return ""
+		}
+		return filepath.Join(dir, name)
+	case wire.PreambleKindTar:
+		return dir
+	default:
+		return ""
 	}
+}
+
+// watchSink wraps the per-transfer xfer.OpenSink output with progress
+// reporting and a final "wrote <name>" announcement. Used by recv --watch
+// where each transfer within the session should land independently.
+type watchSink struct {
+	w        io.WriteCloser
+	cb       func(int64)
+	pr       *progressLine
+	toStdout bool
+	announce string
+	out      io.Writer
+	n        int64
+}
+
+func (w *watchSink) Write(b []byte) (int, error) {
+	n, err := w.w.Write(b)
+	if n > 0 {
+		w.n += int64(n)
+		if w.cb != nil {
+			w.cb(w.n)
+		}
+	}
+	return n, err
+}
+
+func (w *watchSink) Close() error {
+	err := w.w.Close()
+	if w.toStdout {
+		w.pr.Done()
+	} else {
+		w.pr.Finish(" ✓")
+		if w.announce != "" {
+			fmt.Fprintf(w.out, "wrote %s\n", w.announce)
+		}
+	}
+	return err
 }
 
 // openSource resolves the payload Source from --text, positional paths, or "-"

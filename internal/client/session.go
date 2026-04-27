@@ -178,17 +178,24 @@ func OpenReceiver(ctx context.Context, logger *slog.Logger, server string, code 
 	return startSession(rs, conn, key, logger, onTransfer), nil
 }
 
-// PersistentSender is a sender-side handle to a stable rendezvous slot.
-// One reservation, one code, many sequential receivers — call Accept once
-// per inbound peer, push transfers on the returned *Session, then Close
-// the session and call Accept again. The slot stays alive until the
-// PersistentSender itself is Closed or the underlying WebSocket drops.
+// Host is a handle to a stable rendezvous slot. One reservation, one
+// code, many sequential pairings — call Accept once per inbound peer to
+// get a *Session, then Close it and call Accept again. The slot stays
+// alive until the Host itself is Closed or the underlying WebSocket
+// drops.
 //
-// Receivers attempting to join the slot while another receiver is already
-// paired get ErrSlotBusy from the server; the client side surfaces that as
-// a normal error from OpenReceiver. PersistentSender does not buffer or
-// queue concurrent receivers.
-type PersistentSender struct {
+// Host is direction-neutral: the returned *Session lets the caller Push
+// outbound or pull inbound (via the SinkOpener) on each pairing. The
+// motivating use case is a long-lived CLI receiver — `conduit recv
+// --watch` — that hands its stable code to multiple senders, but the
+// same primitive could host a sender that wants to fan out one payload
+// to several receivers in sequence.
+//
+// Peers attempting to join while another peer is already paired get
+// ErrSlotBusy from the server; the client side surfaces that as a normal
+// error from OpenReceiver. Host does not buffer or queue concurrent
+// joiners.
+type Host struct {
 	conn   *websocket.Conn
 	server string
 	policy RelayPolicy
@@ -201,17 +208,17 @@ type PersistentSender struct {
 }
 
 // Code returns the stable rendezvous code for this slot. Safe to share
-// with successive receivers; the slot ID is reused across pairings.
-func (p *PersistentSender) Code() string { return p.code }
+// with successive peers; the slot ID is reused across pairings.
+func (h *Host) Code() string { return h.code }
 
-// OpenSenderPersistent reserves a persistent slot and returns a handle the
-// caller can use to accept successive receivers. onCode is invoked exactly
-// once with the stable code as soon as the reservation is acknowledged.
+// OpenHost reserves a persistent slot and returns a handle the caller
+// can use to accept successive peers. onCode is invoked exactly once
+// with the stable code as soon as the reservation is acknowledged.
 //
-// The returned *PersistentSender owns the WebSocket; the caller must call
-// Close on it when finished. Each successful Accept yields a *Session
-// whose Close leaves the WebSocket open for the next pairing.
-func OpenSenderPersistent(ctx context.Context, logger *slog.Logger, server string, policy RelayPolicy, onCode func(code string)) (*PersistentSender, error) {
+// The returned *Host owns the WebSocket; the caller must call Close on
+// it when finished. Each successful Accept yields a *Session whose Close
+// leaves the WebSocket open for the next pairing.
+func OpenHost(ctx context.Context, logger *slog.Logger, server string, policy RelayPolicy, onCode func(code string)) (*Host, error) {
 	wsURL, err := wsURLFor(server)
 	if err != nil {
 		return nil, fmt.Errorf("resolving websocket URL: %w", err)
@@ -227,29 +234,29 @@ func OpenSenderPersistent(ctx context.Context, logger *slog.Logger, server strin
 	}()
 
 	if err := writeCtl(ctx, conn, wire.ClientHello{Op: wire.OpReserve, Persistent: true}); err != nil {
-		return nil, fmt.Errorf("opening persistent sender: sending reserve: %w", err)
+		return nil, fmt.Errorf("opening host: sending reserve: %w", err)
 	}
 	reserved, err := readCtl(ctx, conn)
 	if err != nil {
-		return nil, fmt.Errorf("opening persistent sender: reading reserved: %w", err)
+		return nil, fmt.Errorf("opening host: reading reserved: %w", err)
 	}
 	if err := expectOp(reserved, wire.OpReserved); err != nil {
-		return nil, fmt.Errorf("opening persistent sender: %w", err)
+		return nil, fmt.Errorf("opening host: %w", err)
 	}
 	logger.DebugContext(ctx, "persistent slot reserved", slog.Uint64("slot", uint64(reserved.Slot)))
 
 	code, err := wire.FormatCode(reserved.Slot)
 	if err != nil {
-		return nil, fmt.Errorf("opening persistent sender: formatting code: %w", err)
+		return nil, fmt.Errorf("opening host: formatting code: %w", err)
 	}
 	parsed, err := wire.ParseCode(code)
 	if err != nil {
-		return nil, fmt.Errorf("opening persistent sender: parsing code: %w", err)
+		return nil, fmt.Errorf("opening host: parsing code: %w", err)
 	}
 	if onCode != nil {
 		onCode(code)
 	}
-	return &PersistentSender{
+	return &Host{
 		conn:   conn,
 		server: server,
 		policy: policy,
@@ -259,56 +266,59 @@ func OpenSenderPersistent(ctx context.Context, logger *slog.Logger, server strin
 	}, nil
 }
 
-// Accept blocks until a receiver pairs, runs PAKE + WebRTC, and returns a
-// *Session for one transfer. The returned session's Close performs the
-// rtc-level teardown handshake but does NOT close the WebSocket — the
-// PersistentSender stays open for the next Accept. Returns ctx.Err() when
-// the caller cancels and a wrapped error if the WebSocket has dropped.
+// Accept blocks until a peer pairs, runs PAKE + WebRTC, and returns a
+// *Session. The returned session's Close performs the rtc-level
+// teardown handshake but does NOT close the WebSocket — the Host stays
+// open for the next Accept. Returns ctx.Err() when the caller cancels
+// and a wrapped error if the WebSocket has dropped.
+//
+// onTransfer is fired per inbound transfer within the returned session
+// (see Session). Pass nil if the host is push-only.
 //
 // Accept is not safe to call concurrently with itself: the WebSocket
 // carries the protocol for one pairing at a time.
-func (p *PersistentSender) Accept(ctx context.Context, onTransfer SinkOpener) (*Session, error) {
-	paired, err := readCtl(ctx, p.conn)
+func (h *Host) Accept(ctx context.Context, onTransfer SinkOpener) (*Session, error) {
+	paired, err := readCtl(ctx, h.conn)
 	if err != nil {
-		return nil, fmt.Errorf("persistent accept: reading paired: %w", err)
+		return nil, fmt.Errorf("host accept: reading paired: %w", err)
 	}
 	if err := expectOp(paired, wire.OpPaired); err != nil {
-		return nil, fmt.Errorf("persistent accept: %w", err)
+		return nil, fmt.Errorf("host accept: %w", err)
 	}
 
-	key, err := wire.SendHandshakeMsg(ctx, wsMsgConn{conn: p.conn}, p.parsed)
+	key, err := wire.SendHandshakeMsg(ctx, wsMsgConn{conn: h.conn}, h.parsed)
 	if err != nil {
-		return nil, fmt.Errorf("persistent accept: pake: %w", err)
+		return nil, fmt.Errorf("host accept: pake: %w", err)
 	}
-	p.logger.DebugContext(ctx, "pake key derived")
+	h.logger.DebugContext(ctx, "pake key derived")
 
 	ice := iceServersFromEnvelope(paired)
-	if p.policy == RelayNone {
+	if h.policy == RelayNone {
 		ice = nil
 	}
 	cfg := rtc.Config{
 		ICEServers:      ice,
-		TransportPolicy: p.policy.transportPolicy(),
-		Logger:          p.logger,
+		TransportPolicy: h.policy.transportPolicy(),
+		Logger:          h.logger,
 	}
-	rs, err := rtc.Initiate(ctx, wsMsgConn{conn: p.conn}, key, cfg)
+	rs, err := rtc.Initiate(ctx, wsMsgConn{conn: h.conn}, key, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("persistent accept: rtc initiate: %w", err)
+		return nil, fmt.Errorf("host accept: rtc initiate: %w", err)
 	}
-	sess := startSession(rs, p.conn, key, p.logger, onTransfer)
+	sess := startSession(rs, h.conn, key, h.logger, onTransfer)
 	sess.keepConn = true
 	return sess, nil
 }
 
-// Close releases the slot by closing the underlying WebSocket. After Close,
-// no further Accepts are possible. Idempotent.
-func (p *PersistentSender) Close() error {
-	p.closeOnce.Do(func() {
-		if err := p.conn.Close(websocket.StatusNormalClosure, ""); err != nil {
-			p.closeErr = fmt.Errorf("closing persistent sender: %w", err)
+// Close releases the slot by closing the underlying WebSocket. After
+// Close, no further Accepts are possible. Idempotent.
+func (h *Host) Close() error {
+	h.closeOnce.Do(func() {
+		if err := h.conn.Close(websocket.StatusNormalClosure, ""); err != nil {
+			h.closeErr = fmt.Errorf("closing host: %w", err)
 		}
 	})
-	return p.closeErr
+	return h.closeErr
 }
 
 // startSession wires a freshly-opened rtc.Session into a client.Session and
