@@ -197,7 +197,7 @@ func (b *wasmBridge) watchPeerClose(h *sessionHandle, id string) {
 	}
 	defer b.sessions.remove(id)
 	defer h.cancel()
-	// Best-effort local close: the rtc layer's exchangeTeardown will
+	// Best-effort local close: the rtc layer's teardown handshake will
 	// short-timeout because the peer is already gone.
 	_ = h.sess.Close(h.ctx)
 	safeInvoke(h.onClosed)

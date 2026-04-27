@@ -30,7 +30,7 @@ import (
 // the same way and the framing tags are unchanged. A v1 sender → v2
 // receiver pairing works as a one-shot transfer; the v2 receiver's Pull
 // returns when the v1 sender's tagEOF arrives, and the rtc-level close
-// cascades back through exchangeTeardown.
+// cascades back through the trickleManager's teardown handshake.
 type Session struct {
 	cfg      Config
 	pc       *webrtc.PeerConnection
@@ -38,8 +38,7 @@ type Session struct {
 	raw      io.ReadWriteCloser
 	closeRaw func()
 	w        io.Writer
-	sig      wire.MsgConn
-	key      []byte
+	tm       *trickleManager
 	route    Route
 
 	// writeMu serializes frame writes on the data channel. Push (tagData /
@@ -200,9 +199,21 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 		}
 	})
 
+	// Register OnICECandidate before exchangeSDP — pion can fire
+	// candidates from inside SetLocalDescription, before that call returns.
+	tm := newTrickleManager(ctx, pc, sig, key, cfg.Logger)
+	defer func() {
+		if err != nil {
+			tm.close()
+		}
+	}()
+
 	if err := exchangeSDP(ctx, pc, sig, key, initiator); err != nil {
 		return nil, fmt.Errorf("opening session: %w", err)
 	}
+	// Both sides have remote descriptions set; flush queued local
+	// candidates and start consuming peer candidates from sig.
+	tm.start(ctx)
 
 	raw, err := openWait.wait(ctx)
 	if err != nil {
@@ -217,8 +228,7 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 		raw:         raw,
 		closeRaw:    rawHolder.close,
 		w:           wrapSendWriter(dc, raw),
-		sig:         sig,
-		key:         key,
+		tm:          tm,
 		route:       detectRoute(pc),
 		inFrames:    make(chan dataFrame),
 		demuxDone:   make(chan struct{}),
@@ -240,9 +250,6 @@ func exchangeSDP(ctx context.Context, pc *webrtc.PeerConnection, sig wire.MsgCon
 		}
 		if err := pc.SetLocalDescription(offer); err != nil {
 			return fmt.Errorf("setting local offer: %w", err)
-		}
-		if err := waitGather(ctx, pc); err != nil {
-			return fmt.Errorf("ice gather: %w", err)
 		}
 		if err := sendSignal(ctx, sig, key, signalMsg{Type: "offer", SDP: pc.LocalDescription().SDP}); err != nil {
 			return fmt.Errorf("sending offer: %w", err)
@@ -275,9 +282,6 @@ func exchangeSDP(ctx context.Context, pc *webrtc.PeerConnection, sig wire.MsgCon
 	}
 	if err := pc.SetLocalDescription(answer); err != nil {
 		return fmt.Errorf("setting local answer: %w", err)
-	}
-	if err := waitGather(ctx, pc); err != nil {
-		return fmt.Errorf("ice gather: %w", err)
 	}
 	if err := sendSignal(ctx, sig, key, signalMsg{Type: "answer", SDP: pc.LocalDescription().SDP}); err != nil {
 		return fmt.Errorf("sending answer: %w", err)
@@ -390,18 +394,19 @@ func (s *Session) Pull(ctx context.Context, dst io.Writer) error {
 	}
 }
 
-// Close tears down the session. exchangeTeardown is best-effort with a
-// short timeout so a peer that wants to keep its half of the session open
-// (e.g. a browser sender that has more transfers to do) does not pin this
-// peer's Close indefinitely. Whether or not teardown completes, the data
-// channel is closed locally; the peer's WebRTC stack observes the cascade
-// and surfaces a connection-closed error to its own session machinery.
+// Close tears down the session. The teardown handshake is best-effort
+// with a short timeout so a peer that wants to keep its half of the
+// session open (e.g. a browser sender that has more transfers to do) does
+// not pin this peer's Close indefinitely. Whether or not teardown
+// completes, the data channel is closed locally; the peer's WebRTC stack
+// observes the cascade and surfaces a connection-closed error to its own
+// session machinery.
 //
 // Idempotent — second and later calls return the first error.
 func (s *Session) Close(ctx context.Context) error {
 	s.closeOnce.Do(func() {
 		teardownCtx, teardownCancel := context.WithTimeout(ctx, teardownTimeout)
-		err := exchangeTeardown(teardownCtx, s.sig, s.key)
+		err := s.tm.exchangeTeardown(teardownCtx)
 		teardownCancel()
 		if err != nil {
 			s.cfg.Logger.DebugContext(ctx, "session teardown handshake", slog.String("err", err.Error()))
@@ -420,6 +425,9 @@ func (s *Session) Close(ctx context.Context) error {
 			s.cfg.Logger.DebugContext(ctx, "session close: demuxer didn't exit within 5s")
 		}
 		s.demuxCancel()
+		// Close trickle before pc so handleLocal stops sending before
+		// pion's gatherer fires its final OnICECandidate(nil) at shutdown.
+		s.tm.close()
 		if err := s.pc.Close(); err != nil && s.closeErr == nil {
 			s.closeErr = fmt.Errorf("close: peer connection: %w", err)
 		}

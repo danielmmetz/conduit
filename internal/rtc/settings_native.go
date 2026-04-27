@@ -3,6 +3,7 @@
 package rtc
 
 import (
+	"strings"
 	"time"
 
 	"github.com/pion/ice/v4"
@@ -31,4 +32,28 @@ func applyNativeSettings(se *webrtc.SettingEngine) {
 	// Default 5s STUN gather timeout can dominate small operation budgets when
 	// srflx candidates are requested alongside sluggish STUN.
 	se.SetSTUNGatherTimeout(time.Second)
+	// Drop docker bridges (docker0, br-XXXX) and the veth halves that pair
+	// containers to those bridges. They never carry inter-host routes; they
+	// only inflate the candidate-pair check matrix. With trickle, that
+	// inflation pushes pion's pair-checker past tight ICE deadlines on
+	// developer laptops with several docker networks. Browsers apply a
+	// similar implicit filter; native pion does not by default.
+	//
+	// Safe inside containers too: a container sees its own NIC as eth0
+	// (not docker*/br-*/veth*) — those names only appear in the host's
+	// network namespace. So a containerized CLI user keeps their one
+	// useful interface. And conduit-server doesn't import this package
+	// at all (it's signaling-only over WebSocket), so the filter never
+	// runs in the deployed container.
+	se.SetInterfaceFilter(func(name string) bool {
+		switch {
+		case strings.HasPrefix(name, "docker"):
+			return false
+		case strings.HasPrefix(name, "br-"):
+			return false
+		case strings.HasPrefix(name, "veth"):
+			return false
+		}
+		return true
+	})
 }

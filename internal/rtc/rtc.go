@@ -1,11 +1,15 @@
 // Package rtc establishes a WebRTC data channel between two conduit peers and
 // shuttles an age-encrypted payload over it.
 //
-// Signaling (SDP offer/answer) is exchanged over a message-oriented transport
-// provided by the caller — typically the WebSocket already paired by the
-// rendezvous server. The SDP bodies are themselves age-encrypted with the
-// PAKE-derived session key K so the server and any TURN relay cannot observe
-// ICE candidates or media lines.
+// Signaling — SDP offer/answer, trickled ICE candidates, end-of-candidates,
+// and the bidirectional teardown handshake — flows over a message-oriented
+// transport provided by the caller, typically the WebSocket already paired
+// by the rendezvous server. Each frame is age-encrypted with the
+// PAKE-derived session key K so the server and any TURN relay cannot
+// observe ICE candidates or media lines. Trickle ICE means the SDP is sent
+// immediately after SetLocalDescription, with no inline candidates;
+// candidates flow as separate frames as pion gathers them, so cross-NAT
+// pairings converge in seconds rather than tens of seconds.
 //
 // Callers choose direct vs. TURN-relayed transport by populating cfg.ICEServers
 // and cfg.TransportPolicy. The default policy gathers host/srflx/relay
@@ -22,7 +26,6 @@ import (
 	"io"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/danielmmetz/conduit/internal/wire"
 	"github.com/pion/webrtc/v4"
@@ -46,9 +49,22 @@ type Config struct {
 	OnRemoteProgress func(totalBytes int64)
 }
 
+// signalMsg is the JSON-encoded envelope exchanged over sig. Type
+// disambiguates which fields are populated:
+//
+//   - "offer" / "answer": SDP only.
+//   - "ice-candidate": Candidate + the optional sdpMid / sdpMLineIndex /
+//     usernameFragment fields, mirroring webrtc.ICECandidateInit.
+//   - "end-of-candidates": no payload — signals that the peer has gathered
+//     all candidates so the local agent can finalize its remote set.
+//   - teardownSignal: no payload — the bidirectional shutdown handshake.
 type signalMsg struct {
-	Type string `json:"type"`
-	SDP  string `json:"sdp"`
+	Type             string  `json:"type"`
+	SDP              string  `json:"sdp,omitempty"`
+	Candidate        string  `json:"candidate,omitempty"`
+	SDPMid           *string `json:"sdpMid,omitempty"`
+	SDPMLineIndex    *uint16 `json:"sdpMLineIndex,omitempty"`
+	UsernameFragment *string `json:"usernameFragment,omitempty"`
 }
 
 // isAnyOf reports whether err matches any of targets via errors.Is. Returns
@@ -150,15 +166,17 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 		}
 	})
 
+	// Register OnICECandidate before SetLocalDescription — pion can fire
+	// candidates from inside SetLocalDescription, before that call returns.
+	tm := newTrickleManager(ctx, pc, sig, key, cfg.Logger)
+	defer tm.close()
+
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
 		return fmt.Errorf("sending: creating offer: %w", err)
 	}
 	if err := pc.SetLocalDescription(offer); err != nil {
 		return fmt.Errorf("sending: setting local offer: %w", err)
-	}
-	if err := waitGather(ctx, pc); err != nil {
-		return fmt.Errorf("sending: %w", err)
 	}
 
 	if err := sendSignal(ctx, sig, key, signalMsg{Type: "offer", SDP: pc.LocalDescription().SDP}); err != nil {
@@ -174,6 +192,9 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer.SDP}); err != nil {
 		return fmt.Errorf("sending: setting remote answer: %w", err)
 	}
+	// Remote description is set; flush queued local candidates and start
+	// consuming peer candidates from sig.
+	tm.start(ctx)
 
 	raw, werr := openWait.wait(ctx)
 	if werr != nil {
@@ -236,7 +257,7 @@ func Send(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, src io.
 	// reader is still dequeuing buffered frames from pion, or we drop the
 	// final ack.
 	_ = ackEG.Wait()
-	if err := exchangeTeardown(ctx, sig, key); err != nil {
+	if err := tm.exchangeTeardown(ctx); err != nil {
 		return fmt.Errorf("sending: %w", err)
 	}
 	return nil
@@ -270,6 +291,11 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 		}
 	})
 
+	// Register OnICECandidate before SetLocalDescription — pion can fire
+	// candidates from inside SetLocalDescription, before that call returns.
+	tm := newTrickleManager(ctx, pc, sig, key, cfg.Logger)
+	defer tm.close()
+
 	offer, err := recvSignal(ctx, sig, key)
 	if err != nil {
 		return fmt.Errorf("receiving: %w", err)
@@ -287,12 +313,12 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 	if err := pc.SetLocalDescription(answer); err != nil {
 		return fmt.Errorf("receiving: setting local answer: %w", err)
 	}
-	if err := waitGather(ctx, pc); err != nil {
-		return fmt.Errorf("receiving: %w", err)
-	}
 	if err := sendSignal(ctx, sig, key, signalMsg{Type: "answer", SDP: pc.LocalDescription().SDP}); err != nil {
 		return fmt.Errorf("receiving: %w", err)
 	}
+	// Remote description is set and our SDP has been sent; flush queued
+	// local candidates and start consuming peer candidates from sig.
+	tm.start(ctx)
 
 	raw, werr := openWait.wait(ctx)
 	if werr != nil {
@@ -327,7 +353,7 @@ func Recv(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, dst io.
 	if err := closeRaw(); err != nil {
 		cfg.Logger.DebugContext(ctx, "closing data channel", slog.String("err", err.Error()))
 	}
-	if err := exchangeTeardown(ctx, sig, key); err != nil {
+	if err := tm.exchangeTeardown(ctx); err != nil {
 		return fmt.Errorf("receiving: %w", err)
 	}
 	return nil
@@ -346,34 +372,6 @@ func newPeerConnection(cfg Config) (*webrtc.PeerConnection, error) {
 		return nil, fmt.Errorf("creating peer connection: %w", err)
 	}
 	return pc, nil
-}
-
-// gatherDeadline bounds how long waitGather waits for ICE candidate gathering
-// to formally "complete" before proceeding with the SDP exchange. Cloudflare's
-// generate-ice-servers returns alternative endpoints (port 53, IPv6) intended
-// to bypass restrictive firewalls; on networks where those aren't reachable,
-// Chrome retries each one for ~40s before declaring gather complete. By that
-// point we already have every useful candidate (host <100ms, srflx <500ms,
-// relay <2s), so 3s is plenty of time to gather them and proceed without the
-// dead-end wait. Any candidates that gather later are not in the SDP we send;
-// proper trickle is the long-term fix and supersedes this deadline.
-const gatherDeadline = 3 * time.Second
-
-// waitGather blocks until ICE gathering completes, the deadline expires, or
-// ctx is canceled. The deadline-expiry path returns nil so the caller proceeds
-// with whatever candidates have already been gathered.
-func waitGather(ctx context.Context, pc *webrtc.PeerConnection) error {
-	done := webrtc.GatheringCompletePromise(pc)
-	timer := time.NewTimer(gatherDeadline)
-	defer timer.Stop()
-	select {
-	case <-done:
-		return nil
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("ice gather: %w", ctx.Err())
-	}
 }
 
 func sendSignal(ctx context.Context, mc wire.MsgConn, key []byte, msg signalMsg) error {
@@ -419,27 +417,3 @@ func recvSignal(ctx context.Context, mc wire.MsgConn, key []byte) (signalMsg, er
 	return out, nil
 }
 
-// exchangeTeardown performs the two-way teardown handshake: both peers send
-// teardownSignal concurrently (so neither deadlocks waiting for the other to
-// send first) and each reads the peer's matching signal. Returns only after
-// both halves complete — at which point all application payload has been
-// transferred and both PeerConnections can safely close.
-func exchangeTeardown(ctx context.Context, mc wire.MsgConn, key []byte) error {
-	var (
-		eg   errgroup.Group
-		peer signalMsg
-	)
-	eg.Go(func() error { return sendSignal(ctx, mc, key, signalMsg{Type: teardownSignal}) })
-	got, recvErr := recvSignal(ctx, mc, key)
-	if err := eg.Wait(); err != nil {
-		return fmt.Errorf("exchanging teardown: %w", err)
-	}
-	if recvErr != nil {
-		return fmt.Errorf("exchanging teardown: %w", recvErr)
-	}
-	peer = got
-	if peer.Type != teardownSignal {
-		return fmt.Errorf("exchanging teardown: expected %q, got %q", teardownSignal, peer.Type)
-	}
-	return nil
-}
