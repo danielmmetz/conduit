@@ -320,24 +320,32 @@ button.copy-inline:hover {
 
 .dropzone:hover,
 .dropzone.drag,
-.paste-field:focus-within {
+.paste-field:hover,
+.paste-field:focus-visible {
   border-color: var(--accent);
   background: var(--accent-bg);
 }
 
-.dropzone.disabled {
+.paste-field:focus-visible {
+  outline: none;
+}
+
+.dropzone.disabled,
+.paste-field:disabled {
   opacity: 0.5;
   pointer-events: none;
 }
 
-.dropzone p {
+.dropzone p,
+.paste-field p {
   margin: 0;
   font-size: 12.5px;
   color: var(--fg);
   line-height: 1.4;
 }
 
-.dropzone p + p {
+.dropzone p + p,
+.paste-field p + p {
   margin-top: 0.15rem;
   font-size: 11px;
   color: var(--muted);
@@ -358,32 +366,8 @@ button.copy-inline:hover {
 }
 
 .paste-field {
-  padding: 0;
-  position: relative;
-}
-
-.paste-field textarea {
-  width: 100%;
-  flex: 1 1 auto;
-  background: transparent;
-  border: 0;
-  color: var(--fg);
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.4;
-  padding: 0.85rem 0.7rem;
-  resize: none;
-  text-align: center;
-}
-
-.paste-field textarea:focus {
-  outline: none;
-  text-align: left;
-}
-
-.paste-field textarea::placeholder {
-  color: var(--muted);
-  text-align: center;
+  font: inherit;
+  color: inherit;
 }
 
 /* Transfer list: grid rows, icon | name | bytes | status. */

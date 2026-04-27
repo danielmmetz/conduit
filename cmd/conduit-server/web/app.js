@@ -276,7 +276,7 @@
     const dropzone = $("dropzone");
     const fileInput = $("fileInput");
     const pickBtn = $("pickBtn");
-    const pasteTarget = $("pasteTarget");
+    const pasteBtn = $("pasteBtn");
     const transferList = $("transferList");
     const pairedStatus = $("pairedStatus");
     const closeBtn = $("closeBtn");
@@ -491,11 +491,28 @@
       }
     });
 
-    pasteTarget.addEventListener("paste", (e) => {
+    pasteBtn.addEventListener("click", async () => {
+      if (pasteBtn.disabled) return;
+      try {
+        const text = await navigator.clipboard.readText();
+        if (!text || !text.trim()) {
+          setStatus(pairedStatus, "Clipboard is empty.", null);
+          return;
+        }
+        pushText(text);
+      } catch (err) {
+        setStatus(pairedStatus, "Could not read clipboard: " + (err && err.message ? err.message : err), "err");
+      }
+    });
+
+    // Desktop Ctrl+V/Cmd+V: paste anywhere on the paired panel sends text.
+    document.addEventListener("paste", (e) => {
+      if (pairedPanel.hidden || pasteBtn.disabled) return;
+      const target = e.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
       const text = e.clipboardData && e.clipboardData.getData("text/plain");
       if (!text || !text.trim()) return;
       e.preventDefault();
-      pasteTarget.value = "";
       pushText(text);
     });
 
@@ -534,7 +551,7 @@
             setStatus(pairedStatus, "Waiting for peer…", null);
             // Disable inputs until paired.
             dropzone.classList.add("disabled");
-            pasteTarget.disabled = true;
+            pasteBtn.disabled = true;
           }
         },
         onPaired: (route) => {
@@ -545,7 +562,7 @@
             setConnectedStatus(pairedStatus, route);
           }
           dropzone.classList.remove("disabled");
-          pasteTarget.disabled = false;
+          pasteBtn.disabled = false;
           closeBtn.disabled = false;
         },
         onTransfer: onIncomingTransfer,

@@ -86,16 +86,15 @@
             <p>or <button type="button" id="pickBtn">click to choose</button></p>
             <input type="file" id="fileInput" hidden />
           </div>
-          <label class="paste-field">
-            <textarea
-              id="pasteTarget"
-              rows="2"
-              autocomplete="off"
-              spellcheck="true"
-              aria-label="Paste to send text"
-              placeholder="Paste text"
-            ></textarea>
-          </label>
+          <button
+            type="button"
+            class="paste-field"
+            id="pasteBtn"
+            aria-label="Send text from clipboard"
+          >
+            <p>Send clipboard</p>
+            <p>or paste</p>
+          </button>
         </div>
 
         <ul id="transferList" class="transfer-list" hidden></ul>
