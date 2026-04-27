@@ -61,6 +61,63 @@
     return (n / div).toFixed(1) + " " + units[exp];
   }
 
+  // formatDuration renders seconds as a compact ETA: "<1s", "Ns", "MmSSs",
+  // "Hh", "HhMMm". Mirrors the CLI's humanDuration so progress lines look
+  // the same in both clients.
+  function formatDuration(seconds) {
+    if (seconds < 1) return "<1s";
+    const s = Math.round(seconds);
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    const sr = s % 60;
+    if (m < 60) {
+      if (sr === 0) return m + "m";
+      return m + "m" + String(sr).padStart(2, "0") + "s";
+    }
+    const h = Math.floor(m / 60);
+    const mr = m % 60;
+    if (mr === 0) return h + "h";
+    return h + "h" + String(mr).padStart(2, "0") + "m";
+  }
+
+  // makeRowProgress returns an onProgress(done, total) callback that
+  // updates the row's bytes/status cells with rate + ETA. inFlightLabel is
+  // the status text rendered until the rate stabilises ("sending" /
+  // "receiving"). Calls are throttled to ~10/s so a fast in-memory
+  // transfer doesn't flood the DOM, but the final 100% update is always
+  // emitted so the row settles.
+  function makeRowProgress(row, inFlightLabel) {
+    const startedAt = Date.now();
+    let lastUpdate = 0;
+    return (done, total) => {
+      const now = Date.now();
+      const final = total > 0 && done >= total;
+      if (!final && now - lastUpdate < 100) return;
+      lastUpdate = now;
+      if (total > 0) {
+        row.bytes.textContent =
+          formatBytes(done) + " / " + formatBytes(total);
+      } else {
+        row.bytes.textContent = formatBytes(done);
+      }
+      const elapsed = (now - startedAt) / 1000;
+      // 250ms warm-up matches the CLI: avoids the first sample rendering an
+      // inflated rate dominated by setup overhead.
+      if (done > 0 && elapsed >= 0.25) {
+        const rate = done / elapsed;
+        if (rate >= 1) {
+          let s = formatBytes(Math.floor(rate)) + "/s";
+          if (total > done) {
+            s += " · ETA " + formatDuration((total - done) / rate);
+          }
+          row.status.textContent = s;
+          return;
+        }
+      }
+      row.status.textContent = inFlightLabel;
+    };
+  }
+
   function isTextPayload(kind, mime) {
     if (kind === "text") return true;
     if (typeof mime === "string" && mime.toLowerCase().startsWith("text/")) {
@@ -365,10 +422,42 @@
       return { code, link, cli };
     }
 
-    function onIncomingTransfer(preamble, bytesUA) {
-      const bytes = new Uint8Array(bytesUA);
+    // Inbound transfers arrive as a 3-event stream from the WASM bridge:
+    // start (preamble decoded) → progress (bytes accumulating) → end
+    // (full payload buffered). currentInbound holds the row + progress
+    // updater between events. Sessions deliver one inbound transfer at a
+    // time, so a single slot is enough.
+    let currentInbound = null;
+
+    function onIncomingStart(preamble) {
       const name = preamble.name || (preamble.kind === "text" ? "text" : "file");
-      const row = appendTransfer("in", name, bytes.byteLength);
+      const total = preamble.size != null && preamble.size >= 0 ? preamble.size : null;
+      const row = appendTransfer("in", name, total);
+      row.status.textContent = "receiving";
+      currentInbound = {
+        row,
+        preamble,
+        update: makeRowProgress(row, "receiving"),
+      };
+    }
+
+    function onIncomingProgress(done, total) {
+      if (!currentInbound) return;
+      // total<0 means streaming source (preamble.size == -1); pass through
+      // so makeRowProgress shows a byte counter without a percentage/ETA.
+      currentInbound.update(done, total);
+    }
+
+    function onIncomingEnd(preamble, bytesUA) {
+      const bytes = new Uint8Array(bytesUA);
+      // If we missed onTransferStart for any reason, build a row on the fly
+      // so the user still gets a record of the inbound transfer.
+      if (!currentInbound) {
+        onIncomingStart(preamble);
+      }
+      const { row } = currentInbound;
+      currentInbound = null;
+      row.bytes.textContent = formatBytes(bytes.byteLength);
       row.status.textContent = "received";
       row.li.classList.add("ok");
       if (isTextPayload(preamble.kind, preamble.mime)) {
@@ -414,6 +503,7 @@
       if (sessionId == null) return;
       const row = appendTransfer("out", file.name, file.size);
       row.status.textContent = "sending";
+      const onProgress = makeRowProgress(row, "sending");
       file.arrayBuffer().then((ab) => {
         const buf = new Uint8Array(ab);
         const mime = file.type || "application/octet-stream";
@@ -422,12 +512,14 @@
           buf,
           file.name,
           mime,
+          onProgress,
           (err) => {
             if (err != null && err !== undefined) {
               row.status.textContent = String(err);
               row.li.classList.add("err");
               return;
             }
+            row.bytes.textContent = formatBytes(file.size);
             row.status.textContent = "sent";
             row.li.classList.add("ok");
           }
@@ -435,17 +527,116 @@
       });
     }
 
+    // walkEntry recurses a FileSystemEntry (from drag-drop's
+    // webkitGetAsEntry) and returns flat {path, file} records, where path is
+    // a slash-separated relative path mirroring the dropped tree. Mirrors
+    // what the CLI's tar producer emits when given a directory.
+    async function walkEntry(entry, prefix) {
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isFile) {
+        const file = await new Promise((resolve, reject) =>
+          entry.file(resolve, reject)
+        );
+        return [{ path, file }];
+      }
+      if (entry.isDirectory) {
+        const reader = entry.createReader();
+        const out = [];
+        for (;;) {
+          const batch = await new Promise((resolve, reject) =>
+            reader.readEntries(resolve, reject)
+          );
+          if (!batch || batch.length === 0) break;
+          for (const sub of batch) {
+            const inner = await walkEntry(sub, path);
+            for (const it of inner) out.push(it);
+          }
+        }
+        return out;
+      }
+      return [];
+    }
+
+    // entriesFromDataTransfer flattens a DataTransfer.items list into
+    // {path, file} records, walking any directory entries. Falls back to
+    // dt.files (no path-preserving info) when the browser does not expose
+    // webkitGetAsEntry.
+    async function entriesFromDataTransfer(dt) {
+      const items = dt.items ? Array.from(dt.items) : [];
+      const recs = [];
+      let walked = false;
+      for (const item of items) {
+        if (item.kind !== "file") continue;
+        const entry = item.webkitGetAsEntry && item.webkitGetAsEntry();
+        if (entry) {
+          walked = true;
+          const inner = await walkEntry(entry, "");
+          for (const it of inner) recs.push(it);
+        }
+      }
+      if (!walked) {
+        const files = dt.files ? Array.from(dt.files) : [];
+        for (const f of files) recs.push({ path: f.name, file: f });
+      }
+      return recs;
+    }
+
+    // pushItems decides between the single-file path (one file dropped, no
+    // directory hierarchy) and the tar path (multiple files or any folder
+    // contents). Mirrors the CLI: 1 file → kind=file; otherwise kind=tar.
+    async function pushItems(items) {
+      if (sessionId == null || items.length === 0) return;
+      if (items.length === 1 && !items[0].path.includes("/")) {
+        pushFile(items[0].file);
+        return;
+      }
+      const total = items.reduce((acc, it) => acc + it.file.size, 0);
+      const root = items[0].path.split("/")[0];
+      const displayName =
+        items.length > 1
+          ? `${root} (+${items.length - 1})`
+          : root || "files.tar";
+      const row = appendTransfer("out", displayName, total);
+      row.status.textContent = "sending";
+      const entries = [];
+      for (const it of items) {
+        const buf = new Uint8Array(await it.file.arrayBuffer());
+        entries.push({ name: it.path, data: buf });
+      }
+      const onProgress = makeRowProgress(row, "sending");
+      globalThis.conduit.sessionPushTar(
+        sessionId,
+        entries,
+        displayName,
+        onProgress,
+        (err) => {
+          if (err != null && err !== undefined) {
+            row.status.textContent = String(err);
+            row.li.classList.add("err");
+            return;
+          }
+          // The tar stream is slightly larger than the sum of file sizes
+          // (PAX headers, padding); the row was created with the file-bytes
+          // total to keep the display intuitive, so leave bytes alone here.
+          row.status.textContent = "sent";
+          row.li.classList.add("ok");
+        }
+      );
+    }
+
     function pushText(text) {
       if (sessionId == null) return;
       const size = new TextEncoder().encode(text).length;
       const row = appendTransfer("out", "text", size);
       row.status.textContent = "sending";
-      globalThis.conduit.sessionPushText(sessionId, text, (err) => {
+      const onProgress = makeRowProgress(row, "sending");
+      globalThis.conduit.sessionPushText(sessionId, text, onProgress, (err) => {
         if (err != null && err !== undefined) {
           row.status.textContent = String(err);
           row.li.classList.add("err");
           return;
         }
+        row.bytes.textContent = formatBytes(size);
         row.status.textContent = "sent";
         row.li.classList.add("ok");
       });
@@ -453,9 +644,16 @@
 
     pickBtn.addEventListener("click", () => fileInput.click());
     fileInput.addEventListener("change", () => {
-      const f = fileInput.files && fileInput.files[0];
-      if (!f) return;
-      pushFile(f);
+      const files = fileInput.files ? Array.from(fileInput.files) : [];
+      if (files.length === 0) return;
+      const items = files.map((f) => ({ path: f.name, file: f }));
+      pushItems(items).catch((err) => {
+        setStatus(
+          pairedStatus,
+          "Send failed: " + (err && err.message ? err.message : err),
+          "err"
+        );
+      });
       fileInput.value = "";
     });
 
@@ -473,9 +671,18 @@
         dropzone.classList.remove("drag");
       });
     });
-    dropzone.addEventListener("drop", (e) => {
-      const f = e.dataTransfer.files && e.dataTransfer.files[0];
-      if (f) pushFile(f);
+    dropzone.addEventListener("drop", async (e) => {
+      if (sessionId == null) return;
+      try {
+        const items = await entriesFromDataTransfer(e.dataTransfer);
+        if (items.length > 0) await pushItems(items);
+      } catch (err) {
+        setStatus(
+          pairedStatus,
+          "Drop failed: " + (err && err.message ? err.message : err),
+          "err"
+        );
+      }
     });
     dropzone.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -565,7 +772,9 @@
           pasteBtn.disabled = false;
           closeBtn.disabled = false;
         },
-        onTransfer: onIncomingTransfer,
+        onTransferStart: onIncomingStart,
+        onTransferProgress: onIncomingProgress,
+        onTransferEnd: onIncomingEnd,
         onError: (msg) => {
           setStatus(pairedStatus, String(msg), "err");
           setStatus(idleStatus, String(msg), "err");

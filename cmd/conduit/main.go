@@ -68,12 +68,13 @@ func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out, stder
 func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text string
-	var showQR, git bool
+	var showQR, git, watch bool
 	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&text, "text", "", "text payload to send instead of a file")
 	fs.BoolVar(&showQR, "qr", false, "after printing the code, render a QR of the browser URL for scanning from a phone")
 	fs.BoolVar(&git, "git", true, "for directory sends, honor a root .gitignore and skip .git/; --git=false sends the tree verbatim")
+	fs.BoolVar(&watch, "watch", false, "after each receive, reserve a fresh slot and wait for another receiver until ctrl-c (each receiver gets a new code; not compatible with stdin)")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "send",
@@ -82,42 +83,125 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
-			src, err := openSource(text, args, stdin, git)
-			if err != nil {
-				return fmt.Errorf("running send: %w", err)
+			if watch && len(args) == 1 && args[0] == xfer.StdinMarker {
+				return fmt.Errorf("running send: --watch cannot be used with a stdin source (cannot replay)")
 			}
-			defer src.Close()
-			pr := newProgressLine(stderr, "↑")
-			defer pr.Done()
-			onCode := func(code string) {
-				fmt.Fprintf(out, "code: %s\n", code)
-				page, pageErr := receivePageURL(server, code)
-				if pageErr == nil {
-					fmt.Fprintf(out, "receive in the browser: %s\n", page)
-				}
-				fmt.Fprintf(out, "receive on the CLI: %s\n", recvCLIHint(server, code))
-				if showQR && pageErr == nil {
-					if err := renderQR(out, page); err != nil {
-						fmt.Fprintf(stderr, "qr render failed: %v\n", err)
-					}
-				}
-				fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
+			if watch {
+				return runSendWatch(ctx, logger, server, policy, text, args, stdin, git, showQR, out, stderr)
 			}
-			sess, err := client.OpenSender(ctx, logger, server, policy, onCode, nil)
-			if err != nil {
-				return fmt.Errorf("running send: %w", err)
-			}
-			defer sess.Close(ctx)
-			fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
-			pr.Update(0, src.Preamble.Size)
-			if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
-				return fmt.Errorf("running send: %w", err)
-			}
-			pr.Update(src.Preamble.Size, src.Preamble.Size)
-			pr.Finish(" ✓")
-			return nil
+			return runSendOnce(ctx, logger, server, policy, text, args, stdin, git, showQR, out, stderr)
 		},
 	}
+}
+
+// runSendWatch reserves a persistent slot once, prints the stable code, and
+// then accepts successive receivers in a loop until ctx is cancelled. Each
+// pairing rebuilds the source so paths are re-read and tar streams are
+// re-spun. The slot stays alive across pairings — receivers all use the
+// same code — so the user can hand the code out once and re-run the
+// receive command as many times as they like.
+func runSendWatch(ctx context.Context, logger *slog.Logger, server string, policy client.RelayPolicy, text string, args []string, stdin io.Reader, git, showQR bool, out, stderr io.Writer) error {
+	var codeOnce sync.Once
+	onCode := func(code string) {
+		codeOnce.Do(func() {
+			fmt.Fprintf(out, "code: %s\n", code)
+			page, pageErr := receivePageURL(server, code)
+			if pageErr == nil {
+				fmt.Fprintf(out, "receive in the browser: %s\n", page)
+			}
+			fmt.Fprintf(out, "receive on the CLI: %s\n", recvCLIHint(server, code))
+			if showQR && pageErr == nil {
+				if err := renderQR(out, page); err != nil {
+					fmt.Fprintf(stderr, "qr render failed: %v\n", err)
+				}
+			}
+			fmt.Fprintln(out, "watch mode: code stays valid for repeated receives until ctrl-c")
+		})
+	}
+	ps, err := client.OpenSenderPersistent(ctx, logger, server, policy, onCode)
+	if err != nil {
+		return fmt.Errorf("running send: %w", err)
+	}
+	defer ps.Close()
+	for {
+		fmt.Fprintln(out, "waiting for receiver...")
+		sess, err := ps.Accept(ctx, nil)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return fmt.Errorf("running send: %w", err)
+		}
+		if err := pushOneViaSession(ctx, sess, text, args, stdin, git, stderr); err != nil {
+			sess.Close(ctx)
+			return fmt.Errorf("running send: %w", err)
+		}
+		sess.Close(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+	}
+}
+
+// pushOneViaSession opens the source, reports route + progress on stderr,
+// pushes one full transfer, and returns. Used by the watch loop's per-
+// receiver iteration.
+func pushOneViaSession(ctx context.Context, sess *client.Session, text string, args []string, stdin io.Reader, git bool, stderr io.Writer) error {
+	src, err := openSource(text, args, stdin, git)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	pr := newProgressLine(stderr, "↑")
+	defer pr.Done()
+	fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
+	pr.Update(0, src.Preamble.Size)
+	if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
+		return err
+	}
+	pr.Update(src.Preamble.Size, src.Preamble.Size)
+	pr.Finish(" ✓")
+	return nil
+}
+
+// runSendOnce performs one full reserve → pair → push → close cycle. The
+// non-watch path calls it once; --watch uses runSendWatch instead so the
+// slot/code stay stable across receivers.
+func runSendOnce(ctx context.Context, logger *slog.Logger, server string, policy client.RelayPolicy, text string, args []string, stdin io.Reader, git, showQR bool, out, stderr io.Writer) error {
+	src, err := openSource(text, args, stdin, git)
+	if err != nil {
+		return fmt.Errorf("running send: %w", err)
+	}
+	defer src.Close()
+	pr := newProgressLine(stderr, "↑")
+	defer pr.Done()
+	onCode := func(code string) {
+		fmt.Fprintf(out, "code: %s\n", code)
+		page, pageErr := receivePageURL(server, code)
+		if pageErr == nil {
+			fmt.Fprintf(out, "receive in the browser: %s\n", page)
+		}
+		fmt.Fprintf(out, "receive on the CLI: %s\n", recvCLIHint(server, code))
+		if showQR && pageErr == nil {
+			if err := renderQR(out, page); err != nil {
+				fmt.Fprintf(stderr, "qr render failed: %v\n", err)
+			}
+		}
+		fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
+	}
+	sess, err := client.OpenSender(ctx, logger, server, policy, onCode, nil)
+	if err != nil {
+		return fmt.Errorf("running send: %w", err)
+	}
+	defer sess.Close(ctx)
+	fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
+	pr.Update(0, src.Preamble.Size)
+	if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
+		return fmt.Errorf("running send: %w", err)
+	}
+	pr.Update(src.Preamble.Size, src.Preamble.Size)
+	pr.Finish(" ✓")
+	return nil
 }
 
 func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
@@ -332,6 +416,7 @@ type progressLine struct {
 	w        io.Writer
 	prefix   string
 	mu       sync.Mutex
+	start    time.Time
 	last     time.Time
 	maxWidth int
 	any      bool
@@ -348,6 +433,9 @@ func (p *progressLine) Update(done, total int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
+	if p.start.IsZero() {
+		p.start = now
+	}
 	// Always emit when the transfer reaches its known total so the user sees a
 	// final 100% line; the throttle would otherwise suppress an ack that lands
 	// in the same window as the prior update.
@@ -357,7 +445,7 @@ func (p *progressLine) Update(done, total int64) {
 	}
 	p.last = now
 	p.any = true
-	p.write(p.formatLine(done, total))
+	p.write(formatProgress(p.prefix, done, total, now.Sub(p.start)))
 }
 
 // Done emits a trailing newline so subsequent output starts on a fresh
@@ -387,12 +475,58 @@ func (p *progressLine) Finish(suffix string) {
 	_, _ = fmt.Fprint(p.w, suffix+"\n")
 }
 
-func (p *progressLine) formatLine(done, total int64) string {
+// formatProgress renders the progress line as
+// "↑ 5.0 MB / 50.0 MB (10%) · 2.1 MB/s · ETA 21s". Rate and ETA are appended
+// only once enough has elapsed to compute them meaningfully — the rate term
+// is suppressed for the first ~250ms so the initial ack doesn't render an
+// inflated number, and ETA is dropped when the total is unknown.
+func formatProgress(prefix string, done, total int64, elapsed time.Duration) string {
+	var s string
 	if total > 0 {
 		pct := float64(done) / float64(total) * 100
-		return fmt.Sprintf("%s %s / %s (%.0f%%)", p.prefix, humanBytes(done), humanBytes(total), pct)
+		s = fmt.Sprintf("%s %s / %s (%.0f%%)", prefix, humanBytes(done), humanBytes(total), pct)
+	} else {
+		s = fmt.Sprintf("%s %s", prefix, humanBytes(done))
 	}
-	return fmt.Sprintf("%s %s", p.prefix, humanBytes(done))
+	const minElapsedForRate = 250 * time.Millisecond
+	if done > 0 && elapsed >= minElapsedForRate {
+		rate := float64(done) / elapsed.Seconds()
+		if rate >= 1 {
+			s += fmt.Sprintf(" · %s/s", humanBytes(int64(rate)))
+			if total > done {
+				etaSec := float64(total-done) / rate
+				s += " · ETA " + humanDuration(time.Duration(etaSec * float64(time.Second)))
+			}
+		}
+	}
+	return s
+}
+
+// humanDuration formats d as a compact, monotonically-shrinking ETA string:
+// sub-second collapses to "<1s", under a minute is "Ns", under an hour is
+// "MmSSs" (or "Mm" if seconds are zero), and longer is "HhMMm".
+func humanDuration(d time.Duration) string {
+	if d < time.Second {
+		return "<1s"
+	}
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		m := int(d / time.Minute)
+		s := int((d - time.Duration(m)*time.Minute) / time.Second)
+		if s == 0 {
+			return fmt.Sprintf("%dm", m)
+		}
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	h := int(d / time.Hour)
+	m := int((d - time.Duration(h)*time.Hour) / time.Minute)
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%02dm", h, m)
 }
 
 func (p *progressLine) write(line string) {

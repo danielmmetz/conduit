@@ -380,7 +380,7 @@ button.copy-inline:hover {
 
 .transfer {
   display: grid;
-  grid-template-columns: 14px 1fr 5rem 4.5rem;
+  grid-template-columns: 14px 1fr auto auto;
   align-items: center;
   column-gap: 0.55rem;
   row-gap: 0.3rem;

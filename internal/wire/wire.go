@@ -31,16 +31,20 @@ const (
 	ErrBadRequest   = "bad_request"
 	ErrRateLimited  = "rate_limited"
 	ErrSlotNotFound = "slot_not_found"
+	ErrSlotBusy     = "slot_busy"
 	ErrExpired      = "expired"
 	ErrCapacity     = "capacity"
 	ErrInternal     = "internal"
 )
 
 // ClientHello is the first frame a client sends after WebSocket accept.
-// Slot is only used with Op == OpJoin.
+// Slot is only used with Op == OpJoin. Persistent is only used with
+// Op == OpReserve and asks the server to keep the slot alive across
+// successive pairings (one stable code, many sequential receivers).
 type ClientHello struct {
-	Op   string `json:"op"`
-	Slot uint32 `json:"slot,omitempty"`
+	Op         string `json:"op"`
+	Slot       uint32 `json:"slot,omitempty"`
+	Persistent bool   `json:"persistent,omitempty"`
 }
 
 type Reserved struct {

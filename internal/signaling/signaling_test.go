@@ -450,6 +450,106 @@ func readCtl(ctx context.Context, conn *websocket.Conn) (wire.Envelope, error) {
 	return env, nil
 }
 
+// TestPersistentSlotTwoReceivers reserves a slot in persistent mode, pairs
+// it with one receiver, lets that pairing wind down, and pairs it again
+// with a second receiver using the same slot ID. Validates that the slot
+// stays in the table across pairings and only releases when the sender
+// closes.
+func TestPersistentSlotTwoReceivers(t *testing.T) {
+	t.Parallel()
+	h := newTestHarness(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	sender := h.dial(ctx, t)
+	writeJSON(t, ctx, sender, wire.ClientHello{Op: wire.OpReserve, Persistent: true})
+	reserved := readEnvelope(t, ctx, sender)
+	if reserved.Op != wire.OpReserved {
+		t.Fatalf("op = %q, want %q", reserved.Op, wire.OpReserved)
+	}
+	slotID := reserved.Slot
+	if slotID == 0 {
+		t.Fatalf("slot = 0, want > 0")
+	}
+
+	for i := range 2 {
+		receiver := h.dial(ctx, t)
+		writeJSON(t, ctx, receiver, wire.ClientHello{Op: wire.OpJoin, Slot: slotID})
+		if got := readEnvelope(t, ctx, sender).Op; got != wire.OpPaired {
+			t.Fatalf("iter %d: sender paired op = %q, want %q", i, got, wire.OpPaired)
+		}
+		if got := readEnvelope(t, ctx, receiver).Op; got != wire.OpPaired {
+			t.Fatalf("iter %d: receiver paired op = %q, want %q", i, got, wire.OpPaired)
+		}
+		// One round-trip relay verifies bytes still flow this iteration.
+		payload := fmt.Sprintf("iter-%d", i)
+		if err := sender.Write(ctx, websocket.MessageText, []byte(payload)); err != nil {
+			t.Fatalf("iter %d sender write: %v", i, err)
+		}
+		_, got, err := receiver.Read(ctx)
+		if err != nil {
+			t.Fatalf("iter %d receiver read: %v", i, err)
+		}
+		if string(got) != payload {
+			t.Fatalf("iter %d got %q, want %q", i, got, payload)
+		}
+		// Receiver disconnects; the persistent slot should remain reserved.
+		if err := receiver.Close(websocket.StatusNormalClosure, ""); err != nil {
+			t.Fatalf("iter %d receiver close: %v", i, err)
+		}
+	}
+
+	// Slot should still be in the table — sender hasn't closed.
+	if got := h.server.ActiveSlots(); got != 1 {
+		t.Fatalf("ActiveSlots between pairings = %d, want 1", got)
+	}
+
+	// Sender closes; slot drains.
+	if err := sender.Close(websocket.StatusNormalClosure, ""); err != nil {
+		t.Fatalf("sender close: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for h.server.ActiveSlots() > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := h.server.ActiveSlots(); got != 0 {
+		t.Errorf("ActiveSlots after sender close = %d, want 0", got)
+	}
+}
+
+// TestPersistentSlotBusyJoin verifies that a second receiver joining
+// during an active pairing on a persistent slot is rejected with
+// ErrSlotBusy rather than silently displacing the first receiver.
+func TestPersistentSlotBusyJoin(t *testing.T) {
+	t.Parallel()
+	h := newTestHarness(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	sender := h.dial(ctx, t)
+	writeJSON(t, ctx, sender, wire.ClientHello{Op: wire.OpReserve, Persistent: true})
+	reserved := readEnvelope(t, ctx, sender)
+	slotID := reserved.Slot
+
+	first := h.dial(ctx, t)
+	writeJSON(t, ctx, first, wire.ClientHello{Op: wire.OpJoin, Slot: slotID})
+	if got := readEnvelope(t, ctx, sender).Op; got != wire.OpPaired {
+		t.Fatalf("sender paired op = %q, want %q", got, wire.OpPaired)
+	}
+	if got := readEnvelope(t, ctx, first).Op; got != wire.OpPaired {
+		t.Fatalf("first paired op = %q, want %q", got, wire.OpPaired)
+	}
+
+	// While the first pairing is live, a second join on the same slot must
+	// see ErrSlotBusy — receivers serialize, they do not displace.
+	second := h.dial(ctx, t)
+	writeJSON(t, ctx, second, wire.ClientHello{Op: wire.OpJoin, Slot: slotID})
+	env := readEnvelope(t, ctx, second)
+	if env.Op != wire.OpError || env.Code != wire.ErrSlotBusy {
+		t.Fatalf("second join env = %+v, want op=error code=%q", env, wire.ErrSlotBusy)
+	}
+}
+
 func isCleanClose(err error) bool {
 	if err == nil {
 		return true

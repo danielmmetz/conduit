@@ -121,11 +121,27 @@ func NewServer(logger *slog.Logger, opts ...Option) *Server {
 }
 
 type slot struct {
-	id           uint32
-	senderConn   *websocket.Conn
+	id         uint32
+	senderConn *websocket.Conn
+	persistent bool
+
+	// pair holds the per-pairing state. The sender handler installs a fresh
+	// pairing at slot creation and, in persistent mode, replaces it under
+	// Server.mu after each pairing's relay teardown so the next receiver's
+	// takeSlot lands on a clean object. Reads from join/expiry paths must go
+	// through Server.mu.
+	pair *pairing
+}
+
+// pairing holds the channels and receiver socket for a single sender-to-
+// receiver pairing. Persistent slots cycle through a sequence of these
+// (one per receiver). Fields are immutable except receiverConn, which
+// takeSlot writes once under Server.mu.
+type pairing struct {
 	receiverConn *websocket.Conn
 
-	// paired is closed under s.mu by takeSlot once a receiver has attached.
+	// paired is closed under Server.mu by takeSlot once a receiver has
+	// attached.
 	paired chan struct{}
 
 	// relayStart is closed by the sender handler once both peers have been
@@ -134,16 +150,24 @@ type slot struct {
 	// don't race the receiver handler's writes on the sender socket.
 	relayStart chan struct{}
 
-	// done is closed once to signal that the slot is finished, either because
-	// one relay direction ended or because a handler bailed out. Both
-	// handlers watch done to terminate their peer's read loop.
+	// done is closed once to signal that this pairing is finished, either
+	// because one relay direction ended or because a handler bailed out.
+	// Both handlers watch done to terminate their peer's read loop.
 	done     chan struct{}
 	doneOnce sync.Once
 }
 
-// cancel signals that the slot is finished; it is safe to call repeatedly.
-func (sl *slot) cancel() {
-	sl.doneOnce.Do(func() { close(sl.done) })
+func newPairing() *pairing {
+	return &pairing{
+		paired:     make(chan struct{}),
+		relayStart: make(chan struct{}),
+		done:       make(chan struct{}),
+	}
+}
+
+// cancel signals that the pairing is finished; safe to call repeatedly.
+func (p *pairing) cancel() {
+	p.doneOnce.Do(func() { close(p.done) })
 }
 
 // HandleHealthz reports liveness.
@@ -191,7 +215,7 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 			writeError(r.Context(), conn, wire.ErrRateLimited, "reserve rate limit")
 			return
 		}
-		s.handleReserve(r.Context(), logger, conn)
+		s.handleReserve(r.Context(), logger, conn, hello.Persistent)
 	case wire.OpJoin:
 		if s.joinLimiter != nil && !s.joinLimiter.Allow(ip) {
 			writeError(r.Context(), conn, wire.ErrRateLimited, "join rate limit")
@@ -203,8 +227,8 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *websocket.Conn) {
-	sl, err := s.newSlot(conn)
+func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *websocket.Conn, persistent bool) {
+	sl, err := s.newSlot(conn, persistent)
 	if err != nil {
 		if errors.Is(err, errCapacity) {
 			writeError(ctx, conn, wire.ErrCapacity, "server at capacity")
@@ -213,7 +237,6 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 		writeError(ctx, conn, wire.ErrInternal, err.Error())
 		return
 	}
-	defer sl.cancel()
 	defer s.removeSlot(sl.id)
 
 	if err := writeJSON(ctx, conn, wire.Reserved{Op: wire.OpReserved, Slot: sl.id}); err != nil {
@@ -221,73 +244,144 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 	}
 
 	logger = logger.With(slog.Uint64("slot", uint64(sl.id)))
-	logger.InfoContext(ctx, "slot reserved")
+	logger.InfoContext(ctx, "slot reserved", slog.Bool("persistent", persistent))
 
+	// slotCtx bounds every per-slot goroutine — the heartbeat below pings
+	// the sender's WS during both relay and the idle gap between pairings,
+	// so a sender that drops mid-watch is detected within one ping interval
+	// rather than waiting for a fresh receiver to fail at PAKE.
+	//
+	// Defer ordering matters: slotWG.Wait must run AFTER cancelSlot so the
+	// heartbeat goroutine sees ctx-done and exits before we block on Wait.
+	// Declaring slotWG.Wait first (= LIFO last) achieves that.
+	var slotWG sync.WaitGroup
+	defer slotWG.Wait()
+	slotCtx, cancelSlot := context.WithCancel(ctx)
+	defer cancelSlot()
+	slotWG.Go(func() { s.runHeartbeat(slotCtx, conn, cancelSlot) })
+
+	// Long-lived sender pump. coder/websocket closes a conn when its Read
+	// context is cancelled, which would kill the slot the moment the first
+	// pair ends. Instead, read sender frames with slotCtx (cancelled only
+	// when the whole slot is teardown-bound) and route each frame to
+	// whichever pairing is currently active. Frames that arrive between
+	// pairings — or during the brief gap when a receiver has just left and
+	// a new one hasn't joined — are dropped on the floor, which matches
+	// what well-behaved senders do (they wait for the next paired envelope
+	// before emitting application frames).
+	slotWG.Go(func() { s.runSenderPump(slotCtx, sl, cancelSlot, logger) })
+
+	for {
+		pair := s.currentPairing(sl)
+		if !s.runPairing(slotCtx, logger, sl, pair) {
+			return
+		}
+		if !persistent || slotCtx.Err() != nil {
+			return
+		}
+		s.resetPairing(sl)
+	}
+}
+
+// runSenderPump reads frames from sl.senderConn for the lifetime of the
+// slot and forwards each one to the current pair's receiverConn (when
+// any). On Read error the pump cancels the slot context, which unwinds
+// handleReserve. The Read uses slotCtx so a per-pair cancellation does
+// not also tear down the underlying WebSocket.
+func (s *Server) runSenderPump(ctx context.Context, sl *slot, cancelSlot context.CancelFunc, logger *slog.Logger) {
+	for {
+		typ, data, err := sl.senderConn.Read(ctx)
+		if err != nil {
+			if !isCleanClose(err) && ctx.Err() == nil {
+				logger.InfoContext(ctx, "sender pump ended", slog.Any("err", err))
+			}
+			cancelSlot()
+			return
+		}
+		s.mu.Lock()
+		recv := sl.pair.receiverConn
+		s.mu.Unlock()
+		if recv == nil {
+			continue
+		}
+		if err := recv.Write(ctx, typ, data); err != nil {
+			// The current receiver is gone or stalled; drop the frame.
+			// handleJoin's read-side will close the pair imminently.
+			continue
+		}
+	}
+}
+
+// runPairing drives one full pair: wait for a receiver, send paired
+// envelopes, run the relay, return when the relay ends. Returns true if
+// the slot may continue to a next pairing (relay ended cleanly), false if
+// the slot is finished (TTL expired, ctx done, or a write to the sender
+// failed).
+func (s *Server) runPairing(ctx context.Context, logger *slog.Logger, sl *slot, pair *pairing) bool {
 	timer := time.NewTimer(s.slotTTL)
 	defer timer.Stop()
 
 	select {
-	case <-sl.paired:
+	case <-pair.paired:
 	case <-timer.C:
 		// Remove from the map before notifying the client so that, by the
 		// time the sender sees the expired error, a fresh reserve attempt
 		// from any IP sees a consistent slot table.
 		if s.removeSlotIfUnpaired(sl.id) {
-			_ = writeJSON(ctx, conn, wire.Error{Op: wire.OpError, Code: wire.ErrExpired})
+			_ = writeJSON(ctx, sl.senderConn, wire.Error{Op: wire.OpError, Code: wire.ErrExpired})
 			logger.InfoContext(ctx, "slot expired before pairing")
-			return
+			return false
 		}
 		// Lost the race with a concurrent takeSlot; the channel is closed.
-		<-sl.paired
+		<-pair.paired
 	case <-ctx.Done():
-		return
+		return false
 	}
+
+	defer pair.cancel()
 
 	// From here, both peers are attached. Announce pairing to each end, then
 	// release the receiver handler to start relaying. Each peer gets its own
 	// freshly-minted TURN credential (when configured): TURN servers bind a
 	// credential to one Allocate, so sharing one credential across both peers
 	// would break the second peer's relay gathering.
-	if err := writeJSON(ctx, conn, s.pairedCtl(ctx, logger)); err != nil {
-		return
+	if err := writeJSON(ctx, sl.senderConn, s.pairedCtl(ctx, logger)); err != nil {
+		return false
 	}
-	if err := writeJSON(ctx, sl.receiverConn, s.pairedCtl(ctx, logger)); err != nil {
-		return
+	if err := writeJSON(ctx, pair.receiverConn, s.pairedCtl(ctx, logger)); err != nil {
+		return false
 	}
-	close(sl.relayStart)
+	close(pair.relayStart)
 
 	logger.InfoContext(ctx, "relay started")
-	relayCtx, cancelRelay := context.WithCancel(ctx)
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	defer cancelRelay()
-	wg.Go(func() {
-		select {
-		case <-sl.done:
-			cancelRelay()
-		case <-relayCtx.Done():
-		}
-	})
-	wg.Go(func() { s.runHeartbeat(relayCtx, conn, cancelRelay) })
-
-	if err := relay(relayCtx, conn, sl.receiverConn); err != nil && !isCleanClose(err) && relayCtx.Err() == nil {
-		logger.InfoContext(ctx, "sender→receiver relay ended", slog.Any("err", err))
+	// Sender-to-receiver pumping is the slot-level pump's job; this
+	// function just waits for the pair to end (handleJoin signals via
+	// pair.done when its read direction errors, or slotCtx is cancelled).
+	select {
+	case <-pair.done:
+	case <-ctx.Done():
+		return false
 	}
+	return true
 }
 
 func (s *Server) handleJoin(ctx context.Context, logger *slog.Logger, conn *websocket.Conn, slotID uint32) {
-	sl, ok := s.takeSlot(slotID, conn)
-	if !ok {
+	sl, pair, status := s.takeSlot(slotID, conn)
+	switch status {
+	case takeNotFound:
 		_ = writeJSON(ctx, conn, wire.Error{Op: wire.OpError, Code: wire.ErrSlotNotFound})
 		return
+	case takeBusy:
+		_ = writeJSON(ctx, conn, wire.Error{Op: wire.OpError, Code: wire.ErrSlotBusy, Message: "another receiver is currently paired with this slot"})
+		return
 	}
-	defer sl.cancel()
+	defer pair.cancel()
 
 	logger = logger.With(slog.Uint64("slot", uint64(slotID)))
 
 	select {
-	case <-sl.relayStart:
-	case <-sl.done:
+	case <-pair.relayStart:
+	case <-pair.done:
 		return
 	case <-ctx.Done():
 		return
@@ -299,7 +393,7 @@ func (s *Server) handleJoin(ctx context.Context, logger *slog.Logger, conn *webs
 	defer cancelRelay()
 	wg.Go(func() {
 		select {
-		case <-sl.done:
+		case <-pair.done:
 			cancelRelay()
 		case <-relayCtx.Done():
 		}
@@ -314,8 +408,9 @@ func (s *Server) handleJoin(ctx context.Context, logger *slog.Logger, conn *webs
 // errCapacity signals that the global concurrent-slot cap is reached.
 var errCapacity = fmt.Errorf("server at capacity")
 
-// newSlot allocates a fresh slot and registers the sender connection.
-func (s *Server) newSlot(senderConn *websocket.Conn) (*slot, error) {
+// newSlot allocates a fresh slot with one initial pairing object and
+// registers the sender connection.
+func (s *Server) newSlot(senderConn *websocket.Conn, persistent bool) (*slot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.slots == nil {
@@ -332,9 +427,8 @@ func (s *Server) newSlot(senderConn *websocket.Conn) (*slot, error) {
 		sl := &slot{
 			id:         id,
 			senderConn: senderConn,
-			paired:     make(chan struct{}),
-			relayStart: make(chan struct{}),
-			done:       make(chan struct{}),
+			persistent: persistent,
+			pair:       newPairing(),
 		}
 		s.slots[id] = sl
 		return sl, nil
@@ -342,28 +436,67 @@ func (s *Server) newSlot(senderConn *websocket.Conn) (*slot, error) {
 	return nil, fmt.Errorf("slot table exhausted")
 }
 
-// takeSlot atomically claims an unpaired slot for the receiver. On success it
-// populates the receiver conn and closes the paired channel under the lock.
-func (s *Server) takeSlot(id uint32, recvConn *websocket.Conn) (*slot, bool) {
+// takeStatus reports the outcome of a takeSlot attempt: ok means the
+// receiver was attached, notFound means the slot does not exist, busy means
+// the slot exists but already has a receiver attached for the current
+// pairing (only reachable on persistent slots while a previous pairing has
+// not finished tearing down).
+type takeStatus int
+
+const (
+	takeOK takeStatus = iota
+	takeNotFound
+	takeBusy
+)
+
+// takeSlot atomically claims the current pairing's receiver position. On
+// success it populates pair.receiverConn and closes pair.paired under the
+// lock; the returned pairing pointer is the snapshot the caller's relay
+// loop should use.
+func (s *Server) takeSlot(id uint32, recvConn *websocket.Conn) (*slot, *pairing, takeStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sl, ok := s.slots[id]
-	if !ok || sl.receiverConn != nil {
-		return nil, false
+	if !ok {
+		return nil, nil, takeNotFound
 	}
-	sl.receiverConn = recvConn
-	close(sl.paired)
-	return sl, true
+	if sl.pair.receiverConn != nil {
+		return nil, nil, takeBusy
+	}
+	sl.pair.receiverConn = recvConn
+	pair := sl.pair
+	close(pair.paired)
+	return sl, pair, takeOK
 }
 
-// removeSlotIfUnpaired atomically deletes id iff it has not been paired,
-// reporting whether it did so. Callers use the return value to distinguish
-// "really expired" from "the receiver just beat us".
+// resetPairing installs a fresh pairing on a persistent slot after the
+// previous pairing's relay has been fully torn down. Callers must hold no
+// other references to the old pairing — its goroutines must already have
+// exited — since this is what the next takeSlot's "is the pairing
+// available" check observes.
+func (s *Server) resetPairing(sl *slot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sl.pair = newPairing()
+}
+
+// currentPairing returns the slot's current pairing under the lock so the
+// sender's loop sees a consistent snapshot before each iteration.
+func (s *Server) currentPairing(sl *slot) *pairing {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sl.pair
+}
+
+// removeSlotIfUnpaired atomically deletes id iff its current pairing has
+// no receiver attached, reporting whether it did so. Callers use the
+// return value to distinguish "really expired" from "the receiver just
+// beat us".
 func (s *Server) removeSlotIfUnpaired(id uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sl, ok := s.slots[id]
-	if !ok || sl.receiverConn != nil {
+	if !ok || sl.pair.receiverConn != nil {
 		return false
 	}
 	delete(s.slots, id)
