@@ -737,7 +737,10 @@
       globalThis.conduit.sessionClose(sessionId);
     });
 
-    reopenBtn.addEventListener("click", () => gotoIdle());
+    reopenBtn.addEventListener("click", () => {
+      gotoIdle();
+      openSession("");
+    });
 
     function openSession(phrase) {
       const server = serverUrl.value.trim() || defaultServerUrl();
