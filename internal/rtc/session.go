@@ -428,8 +428,26 @@ func (s *Session) Close(ctx context.Context) error {
 		// Close trickle before pc so handleLocal stops sending before
 		// pion's gatherer fires its final OnICECandidate(nil) at shutdown.
 		s.tm.close()
-		if err := s.pc.Close(); err != nil && s.closeErr == nil {
-			s.closeErr = fmt.Errorf("close: peer connection: %w", err)
+		// pc.Close blocks inside pion's sctp.Abort (two ~200ms write/read
+		// deadlines) when the peer's transport is already torn down — the
+		// common case on the receiver, since the sender's pc.Close runs first
+		// and tears down DTLS/UDP from under us. On real networks those
+		// deadlines compound and can hang for multiple seconds. Run pc.Close
+		// in a background goroutine and bound the user-visible wait; on
+		// timeout the goroutine continues to drain pion's internals while
+		// our caller proceeds. The process or surrounding loop will outlive
+		// it (one-shot CLI exits, watch loops open a fresh pc per pairing).
+		pcCloseDone := make(chan struct{})
+		go func() {
+			_ = s.pc.Close()
+			close(pcCloseDone)
+		}()
+		pcTimer := time.NewTimer(pcCloseBudget)
+		defer pcTimer.Stop()
+		select {
+		case <-pcCloseDone:
+		case <-pcTimer.C:
+			s.cfg.Logger.DebugContext(ctx, "session close: pc.Close exceeded budget, draining in background")
 		}
 		s.demuxWG.Wait()
 	})
@@ -450,6 +468,15 @@ func (s *Session) Route() Route {
 // raw.Close still propagates and the peer's data channel surfaces a
 // close event within a few additional milliseconds.
 const teardownTimeout = 500 * time.Millisecond
+
+// pcCloseBudget bounds the user-visible wait for pion's pc.Close. The
+// sender's close runs first and tears down DTLS/UDP, so by the time the
+// receiver's pc.Close runs the underlying transport is already gone and
+// pion's sctp.Abort stacks two ~200ms deadlines waiting for an ack that
+// can't arrive. 100ms covers the common cases where pion's internals
+// finish synchronously; beyond that we let the goroutine drain in the
+// background rather than make the user wait on transport cleanup.
+const pcCloseBudget = 100 * time.Millisecond
 
 // atomicRWC is a one-set io.ReadWriteCloser slot, safe to set from OnOpen
 // and read from OnClose-style callbacks without ordering assumptions about
