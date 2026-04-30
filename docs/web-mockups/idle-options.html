@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>conduit — idle panel options</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #08090b;
+        --fg: #ededed;
+        --muted: #6e7178;
+        --border: #1c1d22;
+        --border-strong: #292a30;
+        --panel: #0f1014;
+        --inset: #0b0c10;
+        --accent: #a78bfa;
+        --accent-bg: rgba(167, 139, 250, 0.1);
+        font-family:
+          "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        font-feature-settings: "cv11", "ss01";
+      }
+
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #fbfbfc;
+          --fg: #1a1c20;
+          --muted: #7a7f88;
+          --border: #ececef;
+          --border-strong: #d8dadf;
+          --panel: #ffffff;
+          --inset: #f4f4f6;
+          --accent: #6d28d9;
+          --accent-bg: rgba(109, 40, 217, 0.08);
+        }
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--fg);
+        font-size: 13.5px;
+        line-height: 1.5;
+        letter-spacing: -0.005em;
+      }
+
+      .top {
+        border-bottom: 1px solid var(--border);
+        padding: 0.85rem 1rem 0.65rem;
+        max-width: 38rem;
+        margin: 0 auto;
+      }
+
+      .top h1 {
+        margin: 0;
+        font-weight: 600;
+        font-size: 18px;
+        letter-spacing: -0.02em;
+      }
+
+      .tagline {
+        margin: 0.1rem 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      main {
+        max-width: 38rem;
+        margin: 0 auto;
+        padding: 1.25rem 1rem 4rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+      }
+
+      .option {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      .option-label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-weight: 500;
+        margin: 0;
+      }
+
+      .option-note {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin: 0.15rem 0 0;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.75rem 0.85rem;
+      }
+
+      .instructions {
+        margin: 0 0 0.55rem;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+
+      input[type="text"] {
+        width: 100%;
+        padding: 0.42rem 0.6rem;
+        border-radius: 5px;
+        border: 1px solid var(--border-strong);
+        background: var(--inset);
+        color: var(--fg);
+        font: inherit;
+        font-size: 13px;
+      }
+
+      input[type="text"]:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+
+      .open-row {
+        display: flex;
+        gap: 0.45rem;
+      }
+
+      .open-row input[type="text"] {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
+      .btn-primary,
+      .btn-secondary {
+        flex: 0 0 auto;
+        padding: 0.4rem 0.85rem;
+        border-radius: 5px;
+        font: inherit;
+        font-weight: 600;
+        font-size: 13px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .btn-primary {
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #fff;
+      }
+
+      .btn-primary:hover:not(:disabled) {
+        filter: brightness(1.08);
+      }
+
+      .btn-primary:disabled,
+      .btn-secondary:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .btn-secondary {
+        border: 1px solid var(--border-strong);
+        background: transparent;
+        color: var(--fg);
+      }
+
+      .btn-secondary:hover:not(:disabled) {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      /* Option 3 specifics */
+      .create-block {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.55rem;
+      }
+
+      .create-big {
+        width: 100%;
+        padding: 0.7rem 1rem;
+        border-radius: 5px;
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        font-weight: 600;
+        font-size: 14px;
+        cursor: pointer;
+      }
+
+      .create-big:hover { filter: brightness(1.08); }
+
+      .divider {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .divider::before,
+      .divider::after {
+        content: "";
+        flex: 1 1 auto;
+        height: 1px;
+        background: var(--border);
+      }
+
+      .join-toggle {
+        background: none;
+        border: 0;
+        padding: 0;
+        color: var(--accent);
+        font: inherit;
+        font-size: 12.5px;
+        cursor: pointer;
+        align-self: center;
+      }
+
+      .join-toggle:hover { text-decoration: underline; }
+
+      .join-revealed {
+        display: none;
+        margin-top: 0.55rem;
+      }
+
+      .join-revealed.open { display: flex; }
+
+      /* Option 4: input inside the button */
+      .composite {
+        display: flex;
+        align-items: stretch;
+        background: var(--accent);
+        border-radius: 6px;
+        overflow: hidden;
+        border: 1px solid transparent;
+        transition: filter 0.12s, box-shadow 0.12s;
+      }
+
+      .composite:focus-within {
+        box-shadow: 0 0 0 3px var(--accent-bg);
+      }
+
+      .composite input {
+        flex: 1 1 auto;
+        min-width: 0;
+        background: transparent;
+        border: 0;
+        color: #fff;
+        padding: 0.7rem 1rem;
+        font: inherit;
+        font-size: 14px;
+        font-weight: 500;
+      }
+
+      .composite input::placeholder {
+        color: rgba(255, 255, 255, 0.78);
+        font-weight: 600;
+      }
+
+      .composite input:focus { outline: none; }
+
+      .composite-go {
+        flex: 0 0 auto;
+        background: rgba(0, 0, 0, 0.22);
+        border: 0;
+        border-left: 1px solid rgba(255, 255, 255, 0.18);
+        color: #fff;
+        padding: 0 1rem;
+        font: inherit;
+        font-weight: 600;
+        font-size: 13px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+
+      .composite-go:hover { background: rgba(0, 0, 0, 0.32); }
+
+      .composite-go .arrow {
+        font-size: 14px;
+        line-height: 1;
+        opacity: 0.85;
+      }
+
+      /* Option 7: horizontal create | OR | input | Join */
+      .row-or {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+      }
+
+      .row-or .create-side {
+        flex: 0 0 auto;
+        padding: 0.4rem 0.85rem;
+        border-radius: 5px;
+        border: 1px solid transparent;
+        background: var(--accent);
+        color: #fff;
+        font: inherit;
+        font-weight: 600;
+        font-size: 13px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .row-or .create-side:hover { filter: brightness(1.08); }
+
+      .or-inline {
+        flex: 0 0 auto;
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-weight: 500;
+      }
+
+      .row-or input[type="text"] { flex: 1 1 auto; min-width: 0; }
+
+      /* Option 6 label variants */
+      .variants {
+        display: flex;
+        flex-direction: column;
+        gap: 0.85rem;
+      }
+
+      .variant-row {
+        display: grid;
+        grid-template-columns: 9rem 1fr;
+        align-items: center;
+        gap: 0.85rem;
+      }
+
+      .variant-tag {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-weight: 500;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+      }
+
+      .create-big.lower { text-transform: lowercase; }
+      .create-big.upper {
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 12.5px;
+      }
+      .create-big.title-case { /* identity; we just write the text differently */ }
+      .create-big.compact {
+        font-size: 13px;
+        padding: 0.55rem 1rem;
+      }
+      .create-big.outline {
+        background: transparent;
+        color: var(--accent);
+        border: 1px solid var(--accent);
+      }
+      .create-big.outline:hover {
+        background: var(--accent-bg);
+        filter: none;
+      }
+      .create-big.smcp {
+        font-variant-caps: all-small-caps;
+        font-feature-settings: "smcp", "c2sc";
+      }
+      .create-big.smcp-tracked {
+        font-variant-caps: all-small-caps;
+        font-feature-settings: "smcp", "c2sc";
+        letter-spacing: 0.05em;
+      }
+
+      .legend {
+        max-width: 38rem;
+        margin: 0 auto;
+        padding: 0 1rem 2rem;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <h1>conduit — idle panel options</h1>
+      <p class="tagline">Type into each input to see how the buttons react.</p>
+    </header>
+
+    <main>
+      <!-- Option 0: current, for reference -->
+      <section class="option">
+        <p class="option-label">Current</p>
+        <div class="panel">
+          <p class="instructions">
+            Type a code to join a session, or leave blank to create one.
+          </p>
+          <form class="open-row" onsubmit="event.preventDefault()">
+            <input
+              type="text"
+              placeholder="phrase (or blank to create)"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Session phrase"
+            />
+            <button type="submit" class="btn-primary">Open</button>
+          </form>
+        </div>
+        <p class="option-note">
+          One affordance for two paths; create is invisible until you read the helper text.
+        </p>
+      </section>
+
+      <!-- Option 1: two buttons, one input -->
+      <section class="option">
+        <p class="option-label">Option 1 — Two buttons, one input</p>
+        <div class="panel">
+          <form class="open-row" onsubmit="event.preventDefault()" data-opt="1">
+            <input
+              type="text"
+              placeholder="paste a code to join…"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Session phrase"
+            />
+            <button type="button" class="btn-secondary" data-role="join" disabled>Join</button>
+            <button type="submit" class="btn-primary" data-role="create">Create</button>
+          </form>
+        </div>
+        <p class="option-note">
+          Both paths visible from the first paint. Create stays primary; Join lights up when there's text.
+        </p>
+      </section>
+
+      <!-- Option 2: dynamic button -->
+      <section class="option">
+        <p class="option-label">Option 2 — Dynamic button label</p>
+        <div class="panel">
+          <p class="instructions">
+            Enter a code to join, or leave blank to create one.
+          </p>
+          <form class="open-row" onsubmit="event.preventDefault()" data-opt="2">
+            <input
+              type="text"
+              placeholder="code (optional)"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Session phrase"
+            />
+            <button type="submit" class="btn-primary" data-role="dynamic">
+              Create new session
+            </button>
+          </form>
+        </div>
+        <p class="option-note">
+          Single button; label flips Create ↔ Join with input. Cleaner, but still relies on the helper text.
+        </p>
+      </section>
+
+      <!-- Option 3: lead with create, reveal join -->
+      <section class="option">
+        <p class="option-label">Option 3 — Lead with Create, reveal Join</p>
+        <div class="panel">
+          <div class="create-block">
+            <button type="button" class="create-big">Create new session</button>
+            <button type="button" class="join-toggle" data-role="reveal">
+              Have a code? Join an existing session
+            </button>
+            <form class="open-row join-revealed" onsubmit="event.preventDefault()" data-opt="3">
+              <input
+                type="text"
+                placeholder="paste your code"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Session phrase"
+              />
+              <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+            </form>
+          </div>
+        </div>
+        <p class="option-note">
+          Matches first-time visitor intent (most are creating). Costs joiners one extra click.
+        </p>
+      </section>
+      <!-- Option 5: create on top, join row always visible below -->
+      <section class="option">
+        <p class="option-label">Option 5 — Create on top, join row always visible</p>
+        <div class="panel">
+          <div class="create-block">
+            <button type="button" class="create-big">New session</button>
+            <form class="open-row" onsubmit="event.preventDefault()" data-opt="5">
+              <input
+                type="text"
+                placeholder="join code"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Session phrase"
+              />
+              <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+            </form>
+          </div>
+        </div>
+        <p class="option-note">
+          Both paths visible without interaction; Create is the headline action, Join sits ready below.
+        </p>
+      </section>
+
+      <!-- Option 6: option 5 with an OR divider between create and join -->
+      <section class="option">
+        <p class="option-label">Option 6 — Option 5 with an OR divider</p>
+        <div class="panel">
+          <div class="create-block">
+            <button type="button" class="create-big">New session</button>
+            <div class="divider">or</div>
+            <form class="open-row" onsubmit="event.preventDefault()" data-opt="6">
+              <input
+                type="text"
+                placeholder="join code"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Session phrase"
+              />
+              <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+            </form>
+          </div>
+        </div>
+        <p class="option-note">
+          Same shape as Option 5; the OR rule makes the two paths feel like a deliberate choice, not stacked CTAs.
+        </p>
+      </section>
+
+      <!-- Option 6 label variants -->
+      <section class="option">
+        <p class="option-label">Option 6 — button label variants</p>
+        <div class="panel variants">
+          <!-- A: lowercase -->
+          <div class="variant-row">
+            <span class="variant-tag">lowercase</span>
+            <div class="create-block">
+              <button type="button" class="create-big lower">new session</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6a">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- B: title case -->
+          <div class="variant-row">
+            <span class="variant-tag">Title Case</span>
+            <div class="create-block">
+              <button type="button" class="create-big title-case">New Session</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6b">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- C: uppercase, tracked -->
+          <div class="variant-row">
+            <span class="variant-tag">UPPERCASE</span>
+            <div class="create-block">
+              <button type="button" class="create-big upper">New Session</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6c">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- D: verb only -->
+          <div class="variant-row">
+            <span class="variant-tag">verb only</span>
+            <div class="create-block">
+              <button type="button" class="create-big">Create</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6d">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- E: verb only, alt -->
+          <div class="variant-row">
+            <span class="variant-tag">start (verb)</span>
+            <div class="create-block">
+              <button type="button" class="create-big">Start</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6e">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- F: with leading + -->
+          <div class="variant-row">
+            <span class="variant-tag">+ prefix</span>
+            <div class="create-block">
+              <button type="button" class="create-big">+ New session</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6f">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- G: outline / secondary weight -->
+          <div class="variant-row">
+            <span class="variant-tag">outline</span>
+            <div class="create-block">
+              <button type="button" class="create-big outline">New session</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6g">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- I: small caps -->
+          <div class="variant-row">
+            <span class="variant-tag">small caps</span>
+            <div class="create-block">
+              <button type="button" class="create-big smcp">New session</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6i">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- J: small caps, tracked -->
+          <div class="variant-row">
+            <span class="variant-tag">small caps · tracked</span>
+            <div class="create-block">
+              <button type="button" class="create-big smcp-tracked">New session</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6j">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+
+          <!-- H: compact size -->
+          <div class="variant-row">
+            <span class="variant-tag">compact</span>
+            <div class="create-block">
+              <button type="button" class="create-big compact">New session</button>
+              <div class="divider">or</div>
+              <form class="open-row" onsubmit="event.preventDefault()" data-opt="6h">
+                <input type="text" placeholder="join code" autocomplete="off" spellcheck="false" aria-label="Session phrase" />
+                <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        <p class="option-note">
+          Same layout as Option 6; only the Create button label/styling changes.
+        </p>
+      </section>
+
+      <!-- Option 7: option 1 reordered, with OR between Create and the join input -->
+      <section class="option">
+        <p class="option-label">Option 7 — Create | OR | code + Join, all in one row</p>
+        <div class="panel">
+          <form class="row-or" onsubmit="event.preventDefault()" data-opt="7">
+            <button type="button" class="create-side">New session</button>
+            <span class="or-inline">or</span>
+            <input
+              type="text"
+              placeholder="join code"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Session phrase"
+            />
+            <button type="submit" class="btn-primary" data-role="join" disabled>Join</button>
+          </form>
+        </div>
+        <p class="option-note">
+          Compact, single-row variant of Option 1 with an explicit OR rather than relying on side-by-side buttons.
+        </p>
+      </section>
+
+      <!-- Option 4: input lives inside the button -->
+      <section class="option">
+        <p class="option-label">Option 4 — Input inside the button</p>
+        <div class="panel">
+          <form class="composite" onsubmit="event.preventDefault()" data-opt="4">
+            <input
+              type="text"
+              placeholder="Create a new session, or paste a code…"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Session phrase"
+            />
+            <button type="submit" class="composite-go" data-role="go">
+              <span data-role="label">Create</span>
+              <span class="arrow" aria-hidden="true">→</span>
+            </button>
+          </form>
+        </div>
+        <p class="option-note">
+          One affordance, but the call to action is on the surface itself. Empty = Create; typed = Join.
+        </p>
+      </section>
+    </main>
+
+    <p class="legend">
+      Mockup only — buttons don't open sessions. The interactivity here is just the enable/label logic.
+    </p>
+
+    <script>
+      // Option 1: enable Join when input has text; Create stays available always.
+      (function () {
+        const form = document.querySelector('[data-opt="1"]');
+        if (!form) return;
+        const input = form.querySelector("input");
+        const join = form.querySelector('[data-role="join"]');
+        input.addEventListener("input", () => {
+          join.disabled = input.value.trim().length === 0;
+        });
+      })();
+
+      // Option 2: dynamic label.
+      (function () {
+        const form = document.querySelector('[data-opt="2"]');
+        if (!form) return;
+        const input = form.querySelector("input");
+        const btn = form.querySelector('[data-role="dynamic"]');
+        input.addEventListener("input", () => {
+          btn.textContent =
+            input.value.trim().length === 0 ? "Create new session" : "Join session";
+        });
+      })();
+
+      // Option 5: enable Join when input has text.
+      (function () {
+        const form = document.querySelector('[data-opt="5"]');
+        if (!form) return;
+        const input = form.querySelector("input");
+        const join = form.querySelector('[data-role="join"]');
+        input.addEventListener("input", () => {
+          join.disabled = input.value.trim().length === 0;
+        });
+      })();
+
+      // Options 6 and 7 (and 6a–6h variants): enable Join when input has text.
+      ["6", "7", "6a", "6b", "6c", "6d", "6e", "6f", "6g", "6h", "6i", "6j"].forEach((n) => {
+        const form = document.querySelector(`[data-opt="${n}"]`);
+        if (!form) return;
+        const input = form.querySelector("input");
+        const join = form.querySelector('[data-role="join"]');
+        input.addEventListener("input", () => {
+          join.disabled = input.value.trim().length === 0;
+        });
+      });
+
+      // Option 4: label flips Create ↔ Join based on input.
+      (function () {
+        const form = document.querySelector('[data-opt="4"]');
+        if (!form) return;
+        const input = form.querySelector("input");
+        const label = form.querySelector('[data-role="label"]');
+        input.addEventListener("input", () => {
+          label.textContent =
+            input.value.trim().length === 0 ? "Create" : "Join";
+        });
+      })();
+
+      // Option 3: reveal join row, then enable Join when input has text.
+      (function () {
+        const form = document.querySelector('[data-opt="3"]');
+        if (!form) return;
+        const reveal = document.querySelector('[data-role="reveal"]');
+        const input = form.querySelector("input");
+        const join = form.querySelector('[data-role="join"]');
+        reveal.addEventListener("click", () => {
+          form.classList.add("open");
+          input.focus();
+        });
+        input.addEventListener("input", () => {
+          join.disabled = input.value.trim().length === 0;
+        });
+      })();
+    </script>
+  </body>
+</html>

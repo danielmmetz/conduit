@@ -170,6 +170,45 @@ input[type="text"]:focus {
   font-size: 12.5px;
 }
 
+.create-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.create-big {
+  width: 100%;
+  padding: 0.7rem 1rem;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.create-big:hover { filter: brightness(1.08); }
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+}
+
 .open-row {
   display: flex;
   gap: 0.45rem;

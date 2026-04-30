@@ -41,20 +41,21 @@
       </label>
 
       <section class="panel" id="idlePanel">
-        <p class="muted instructions">
-          Type a code to join a session, or leave blank to create one.
-        </p>
-        <form id="idleForm" class="open-row">
-          <input
-            type="text"
-            id="phraseInput"
-            placeholder="phrase (or blank to create)"
-            autocomplete="off"
-            spellcheck="false"
-            aria-label="Session phrase"
-          />
-          <button type="submit" id="openBtn">Open</button>
-        </form>
+        <div class="create-block">
+          <button type="button" id="createBtn" class="create-big">+ Create</button>
+          <div class="divider">or</div>
+          <form id="joinForm" class="open-row">
+            <input
+              type="text"
+              id="phraseInput"
+              placeholder="code"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Session code"
+            />
+            <button type="submit" id="joinBtn" disabled>Join</button>
+          </form>
+        </div>
         <p id="idleStatus" class="status" role="status"></p>
       </section>
 

@@ -317,10 +317,16 @@
     }
 
     const idlePanel = $("idlePanel");
-    const idleForm = $("idleForm");
+    const createBtn = $("createBtn");
+    const joinForm = $("joinForm");
     const phraseInput = $("phraseInput");
-    const openBtn = $("openBtn");
+    const joinBtn = $("joinBtn");
     const idleStatus = $("idleStatus");
+
+    function updateJoinEnabled() {
+      joinBtn.disabled = phraseInput.value.trim().length === 0;
+    }
+    phraseInput.addEventListener("input", updateJoinEnabled);
 
     const pairedPanel = $("pairedPanel");
     const hostCode = $("hostCode");
@@ -365,9 +371,10 @@
       qrHost.replaceChildren();
       const hashCode = parseHashCode();
       phraseInput.value = hashCode;
-      openBtn.disabled = false;
+      createBtn.disabled = false;
       phraseInput.disabled = false;
-      phraseInput.focus();
+      updateJoinEnabled();
+      if (hashCode) phraseInput.focus();
     }
 
     function gotoPaired(hostCodeData) {
@@ -732,11 +739,10 @@
 
     reopenBtn.addEventListener("click", () => gotoIdle());
 
-    idleForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const phrase = phraseInput.value.trim();
+    function openSession(phrase) {
       const server = serverUrl.value.trim() || defaultServerUrl();
-      openBtn.disabled = true;
+      createBtn.disabled = true;
+      joinBtn.disabled = true;
       phraseInput.disabled = true;
       setStatus(idleStatus, "Connecting…", null);
 
@@ -778,8 +784,9 @@
         onError: (msg) => {
           setStatus(pairedStatus, String(msg), "err");
           setStatus(idleStatus, String(msg), "err");
-          openBtn.disabled = false;
+          createBtn.disabled = false;
           phraseInput.disabled = false;
+          updateJoinEnabled();
           sessionId = null;
         },
         onClosed: () => {
@@ -794,15 +801,25 @@
       }
       if (!sessionId) {
         setStatus(idleStatus, "Could not open session.", "err");
-        openBtn.disabled = false;
+        createBtn.disabled = false;
         phraseInput.disabled = false;
+        updateJoinEnabled();
       }
+    }
+
+    createBtn.addEventListener("click", () => openSession(""));
+    joinForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      openSession(phraseInput.value.trim());
     });
 
     window.addEventListener("hashchange", () => {
       if (idlePanel.hidden) return;
       const c = parseHashCode();
-      if (c) phraseInput.value = c;
+      if (c) {
+        phraseInput.value = c;
+        updateJoinEnabled();
+      }
     });
 
     gotoIdle();
@@ -812,7 +829,8 @@
     const initialHash = parseHashCode();
     if (initialHash) {
       phraseInput.value = initialHash;
-      idleForm.requestSubmit();
+      updateJoinEnabled();
+      joinForm.requestSubmit();
     }
   }
 
