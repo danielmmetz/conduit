@@ -280,6 +280,7 @@ func (s *Server) handleReserve(ctx context.Context, logger *slog.Logger, conn *w
 			return
 		}
 		s.resetPairing(sl)
+		logger.DebugContext(slotCtx, "pairing reset")
 	}
 }
 
@@ -321,8 +322,10 @@ func (s *Server) runPairing(ctx context.Context, logger *slog.Logger, sl *slot, 
 	timer := time.NewTimer(s.slotTTL)
 	defer timer.Stop()
 
+	logger.DebugContext(ctx, "pairing wait start", slog.Duration("ttl", s.slotTTL))
 	select {
 	case <-pair.paired:
+		logger.DebugContext(ctx, "pairing observed paired")
 	case <-timer.C:
 		// Remove from the map before notifying the client so that, by the
 		// time the sender sees the expired error, a fresh reserve attempt
@@ -359,6 +362,7 @@ func (s *Server) runPairing(ctx context.Context, logger *slog.Logger, sl *slot, 
 	// pair.done when its read direction errors, or slotCtx is cancelled).
 	select {
 	case <-pair.done:
+		logger.DebugContext(ctx, "pairing observed done")
 	case <-ctx.Done():
 		return false
 	}
@@ -366,18 +370,23 @@ func (s *Server) runPairing(ctx context.Context, logger *slog.Logger, sl *slot, 
 }
 
 func (s *Server) handleJoin(ctx context.Context, logger *slog.Logger, conn *websocket.Conn, slotID uint32) {
+	logger = logger.With(slog.Uint64("slot", uint64(slotID)))
+	logger.DebugContext(ctx, "join arrived")
 	sl, pair, status := s.takeSlot(slotID, conn)
 	switch status {
 	case takeNotFound:
+		logger.DebugContext(ctx, "join rejected", slog.String("reason", "slot_not_found"))
 		_ = writeJSON(ctx, conn, wire.Error{Op: wire.OpError, Code: wire.ErrSlotNotFound})
 		return
 	case takeBusy:
+		logger.DebugContext(ctx, "join rejected", slog.String("reason", "slot_busy"))
 		_ = writeJSON(ctx, conn, wire.Error{Op: wire.OpError, Code: wire.ErrSlotBusy, Message: "another receiver is currently paired with this slot"})
 		return
 	}
-	defer pair.cancel()
-
-	logger = logger.With(slog.Uint64("slot", uint64(slotID)))
+	defer func() {
+		logger.DebugContext(ctx, "join handler exiting")
+		pair.cancel()
+	}()
 
 	select {
 	case <-pair.relayStart:
@@ -400,9 +409,11 @@ func (s *Server) handleJoin(ctx context.Context, logger *slog.Logger, conn *webs
 	})
 	wg.Go(func() { s.runHeartbeat(relayCtx, conn, cancelRelay) })
 
-	if err := relay(relayCtx, conn, sl.senderConn); err != nil && !isCleanClose(err) && relayCtx.Err() == nil {
+	err := relay(relayCtx, conn, sl.senderConn)
+	if err != nil && !isCleanClose(err) && relayCtx.Err() == nil {
 		logger.InfoContext(ctx, "receiver→sender relay ended", slog.Any("err", err))
 	}
+	logger.DebugContext(ctx, "relay loop returned", slog.Bool("clean", err == nil || isCleanClose(err)))
 }
 
 // errCapacity signals that the global concurrent-slot cap is reached.
