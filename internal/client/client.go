@@ -72,9 +72,13 @@ type SinkOpener func(wire.Preamble) (io.WriteCloser, error)
 // the payload so the receiver can pick a sink (single file / tar extractor /
 // stdout) without the server or TURN relay ever observing filenames or sizes.
 // onProgress, if non-nil, is called each time the peer acknowledges additional
-// payload bytes; treat the argument as a cumulative payload-byte total
+// payload bytes; treat the argument as a cumulative wire-byte total
 // (best-effort). The preamble overhead is subtracted before invoking the
-// callback so the value matches preamble.Size for known-size payloads.
+// callback so the value matches preamble.Size at completion for uncompressed
+// payloads. With compression announced on the preamble, the count reflects
+// compressed wire bytes — callers wanting an uncompressed-byte meter must
+// install a counter on the source upstream of the encoder (see
+// xfer.SourceOptions.Progress).
 func Send(ctx context.Context, logger *slog.Logger, server string, policy RelayPolicy, preamble wire.Preamble, src io.Reader, onCode func(code string), onProgress func(int64)) error {
 	wsURL, err := wsURLFor(server)
 	if err != nil {
@@ -296,6 +300,9 @@ func (p *preambleSink) Close() error {
 func decodePreamble(body []byte) (wire.Preamble, error) {
 	var pre wire.Preamble
 	if err := json.Unmarshal(body, &pre); err != nil {
+		return wire.Preamble{}, fmt.Errorf("decoding preamble: %w", err)
+	}
+	if err := wire.ValidatePreamble(pre); err != nil {
 		return wire.Preamble{}, fmt.Errorf("decoding preamble: %w", err)
 	}
 	return pre, nil

@@ -75,7 +75,7 @@ func TestSessionRoundTrip(t *testing.T) {
 	sender, receiver := sr.sess, rr.sess
 
 	payload := []byte("session round trip via real signaling")
-	preamble := wire.Preamble{Kind: wire.PreambleKindText, Name: "msg", Size: int64(len(payload))}
+	preamble := wire.Preamble{Kind: wire.PreambleKindText, Name: "msg", Size: int64(len(payload)), Compression: wire.PreambleCompressionNone}
 	if err := sender.Push(ctx, preamble, bytes.NewReader(payload)); err != nil {
 		t.Fatalf("push: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestSessionMultiPushSameDirection(t *testing.T) {
 		{"third", []byte("γ")},
 	}
 	for _, w := range want {
-		preamble := wire.Preamble{Kind: wire.PreambleKindText, Name: w.name, Size: int64(len(w.body))}
+		preamble := wire.Preamble{Kind: wire.PreambleKindText, Name: w.name, Size: int64(len(w.body)), Compression: wire.PreambleCompressionNone}
 		if err := sender.Push(ctx, preamble, bytes.NewReader(w.body)); err != nil {
 			t.Fatalf("push %q: %v", w.name, err)
 		}

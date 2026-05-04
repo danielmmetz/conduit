@@ -16,6 +16,7 @@ import (
 
 	"github.com/danielmmetz/conduit/internal/client"
 	"github.com/danielmmetz/conduit/internal/wire"
+	"github.com/danielmmetz/conduit/internal/xfer"
 	"rsc.io/qr"
 )
 
@@ -160,10 +161,11 @@ func (b *wasmBridge) runSend(ctx context.Context, server string, payload []byte,
 		},
 	}
 	preamble := wire.Preamble{
-		Kind: wire.PreambleKindFile,
-		Name: filename,
-		Size: int64(len(payload)),
-		MIME: "application/octet-stream",
+		Kind:        wire.PreambleKindFile,
+		Name:        filename,
+		Size:        int64(len(payload)),
+		MIME:        "application/octet-stream",
+		Compression: wire.PreambleCompressionNone,
 	}
 	err := client.Send(ctx, b.logger, server, client.RelayAuto, preamble, pr, func(code string) {
 		safeInvoke(onCode, code)
@@ -207,9 +209,10 @@ func (b *wasmBridge) runSendText(ctx context.Context, server, text string, onCod
 		},
 	}
 	preamble := wire.Preamble{
-		Kind: wire.PreambleKindText,
-		Size: int64(len(payload)),
-		MIME: "text/plain; charset=utf-8",
+		Kind:        wire.PreambleKindText,
+		Size:        int64(len(payload)),
+		MIME:        "text/plain; charset=utf-8",
+		Compression: wire.PreambleCompressionNone,
 	}
 	err := client.Send(ctx, b.logger, server, client.RelayAuto, preamble, pr, func(code string) {
 		safeInvoke(onCode, code)
@@ -277,7 +280,14 @@ func (b *wasmBridge) runRecv(ctx context.Context, server, codeStr string, onProg
 			// bytes as a single blob so the user can save it locally.
 			filename = "conduit-received.tar"
 		}
-		return nopWriteCloser{pw}, nil
+		// WrapDecode is a no-op for compression == "none"; for "zstd" it
+		// decodes wire bytes before they hit the buffer so the browser
+		// receives the user's original payload, not the encoded stream.
+		decoded, err := xfer.WrapDecode(nopWriteCloser{pw}, pre.Compression)
+		if err != nil {
+			return nil, fmt.Errorf("wrapping decoder: %w", err)
+		}
+		return decoded, nil
 	}
 	err = client.Recv(ctx, b.logger, server, code, client.RelayAuto, open)
 	if err != nil {

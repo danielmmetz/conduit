@@ -21,9 +21,15 @@ const StdoutMarker = "-"
 // CWD for tar; stdout for text). OutPath "-" → always stdout. Other → path
 // override. Stdout is the writer for stdout-fallback cases so tests can plug
 // in a buffer instead of os.Stdout.
+//
+// Progress, if non-nil, is invoked with the cumulative count of user-visible
+// (post-decompression) bytes written to the underlying sink. It runs inside
+// the decompression wrapper so the caller sees uncompressed byte counts
+// regardless of the codec chosen by the sender.
 type SinkOptions struct {
-	OutPath string
-	Stdout  io.Writer
+	OutPath  string
+	Stdout   io.Writer
+	Progress func(int64)
 }
 
 // OpenSink returns an io.WriteCloser that consumes the incoming payload
@@ -31,10 +37,37 @@ type SinkOptions struct {
 // adapter that extracts tar entries under the chosen directory root, with
 // traversal guards (no absolute paths, no ".." escapes, no symlinks).
 //
+// When the sender announces a non-"none" compression in pre, the returned
+// writer accepts the compressed stream from the wire and feeds the user's
+// sink with the decompressed bytes. The Progress callback (if provided) sees
+// uncompressed counts.
+//
 // Close must be called on the returned writer so tar extraction state (the
 // tar.Reader position) is verified and, for single-file sinks, the file is
 // closed before returning.
 func OpenSink(pre wire.Preamble, opts SinkOptions) (io.WriteCloser, error) {
+	inner, err := openInnerSink(pre, opts)
+	if err != nil {
+		return nil, fmt.Errorf("opening inner sink: %w", err)
+	}
+	if opts.Progress != nil {
+		inner = &countingWriter{w: inner, cb: opts.Progress}
+	}
+	out, err := WrapDecode(inner, pre.Compression)
+	if err != nil {
+		// WrapDecode now leaves ownership with the caller on error; the file
+		// or tar extractor we just opened needs to be released here.
+		_ = inner.Close()
+		return nil, fmt.Errorf("wrapping decoder: %w", err)
+	}
+	return out, nil
+}
+
+// openInnerSink builds the sink that consumes the user's bytes (the sink
+// the user named with -o or that defaults from the preamble). It is wrapped
+// by OpenSink with progress counting and compression decoding so callers
+// always see post-decompression bytes.
+func openInnerSink(pre wire.Preamble, opts SinkOptions) (io.WriteCloser, error) {
 	switch pre.Kind {
 	case wire.PreambleKindFile, wire.PreambleKindText:
 		return openFileSink(pre, opts)

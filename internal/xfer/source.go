@@ -39,24 +39,45 @@ func (s *Source) Close() error {
 // StdinMarker is the path string that means "read from stdin".
 const StdinMarker = "-"
 
+// SourceOptions configures how a Source is built. Compression chooses the
+// codec applied to the user's bytes before they hit the wire. Progress, if
+// non-nil, is invoked with the cumulative count of user-visible
+// (uncompressed) bytes read from the source — counted upstream of the
+// encoder so the caller sees the same byte numbers regardless of codec.
+type SourceOptions struct {
+	Compression CompressMode
+	Progress    func(int64)
+}
+
 // OpenText builds a text Source from a literal string. The preamble carries
-// the exact byte length so the receiver can default to stdout without knowing
-// the content MIME.
-func OpenText(text string) *Source {
-	return &Source{
-		Preamble: wire.Preamble{Kind: wire.PreambleKindText, Size: int64(len(text)), MIME: "text/plain; charset=utf-8"},
-		Reader:   io.NopCloser(strings.NewReader(text)),
+// the exact byte length so the receiver can default to stdout without
+// knowing the content MIME. Auto compression on text always resolves to
+// none (the encoder overhead exceeds the gain).
+func OpenText(text string, opts SourceOptions) (*Source, error) {
+	pre := wire.Preamble{
+		Kind:        wire.PreambleKindText,
+		Size:        int64(len(text)),
+		MIME:        "text/plain; charset=utf-8",
+		Compression: wire.PreambleCompressionNone,
 	}
+	rdr := io.NopCloser(strings.NewReader(text))
+	return finalizeSource(&Source{Preamble: pre, Reader: rdr}, opts)
 }
 
 // OpenStdin builds a streaming Source from stdin. Size is unknown so the
 // preamble records -1; the receiver cannot show a percentage bar for stdin
-// sources, only a byte counter.
-func OpenStdin(stdin io.Reader) *Source {
-	return &Source{
-		Preamble: wire.Preamble{Kind: wire.PreambleKindFile, Name: "stdin", Size: -1, MIME: "application/octet-stream"},
-		Reader:   io.NopCloser(stdin),
+// sources, only a byte counter. Auto compression turns zstd on (we cannot
+// peek at stdin to MIME-detect).
+func OpenStdin(stdin io.Reader, opts SourceOptions) (*Source, error) {
+	pre := wire.Preamble{
+		Kind:        wire.PreambleKindFile,
+		Name:        "stdin",
+		Size:        -1,
+		MIME:        "application/octet-stream",
+		Compression: wire.PreambleCompressionNone,
 	}
+	rdr := io.NopCloser(stdin)
+	return finalizeSource(&Source{Preamble: pre, Reader: rdr}, opts)
 }
 
 // OpenPaths resolves one or more positional paths into a Source. The rules:
@@ -72,12 +93,20 @@ func OpenStdin(stdin io.Reader) *Source {
 // Paths are opened lazily where possible: for the single-file case we open
 // and stat the file here so a missing path fails fast; for the tar case we
 // validate each path exists, then build a piped tar-producer goroutine.
-func OpenPaths(paths []string, stdin io.Reader, git bool) (*Source, error) {
+//
+// opts.Compression chooses the codec; the chosen codec is recorded in
+// Source.Preamble.Compression and (for zstd) the reader is wrapped so the
+// caller's reads return the compressed stream. Preamble.Size keeps the
+// user-visible (uncompressed) byte count regardless of codec, so the
+// receiver's progress meter can render a percentage even when the wire
+// length is hidden by compression. opts.Progress, if non-nil, is invoked
+// with cumulative uncompressed byte counts — see [SourceOptions].
+func OpenPaths(paths []string, stdin io.Reader, git bool, opts SourceOptions) (*Source, error) {
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("resolving send source: no paths given")
 	}
 	if len(paths) == 1 && paths[0] == StdinMarker {
-		return OpenStdin(stdin), nil
+		return OpenStdin(stdin, opts)
 	}
 	if slices.Contains(paths, StdinMarker) {
 		return nil, fmt.Errorf("resolving send source: stdin %q cannot be combined with other paths", StdinMarker)
@@ -93,12 +122,13 @@ func OpenPaths(paths []string, stdin io.Reader, git bool) (*Source, error) {
 				return nil, fmt.Errorf("opening %s: %w", paths[0], err)
 			}
 			pre := wire.Preamble{
-				Kind: wire.PreambleKindFile,
-				Name: filepath.Base(paths[0]),
-				Size: info.Size(),
-				MIME: guessMIME(paths[0]),
+				Kind:        wire.PreambleKindFile,
+				Name:        filepath.Base(paths[0]),
+				Size:        info.Size(),
+				MIME:        guessMIME(paths[0]),
+				Compression: wire.PreambleCompressionNone,
 			}
-			return &Source{Preamble: pre, Reader: f}, nil
+			return finalizeSource(&Source{Preamble: pre, Reader: f}, opts)
 		}
 		if !info.IsDir() {
 			return nil, fmt.Errorf("resolving send source: %s is neither a regular file nor a directory", paths[0])
@@ -110,7 +140,62 @@ func OpenPaths(paths []string, stdin io.Reader, git bool) (*Source, error) {
 			return nil, fmt.Errorf("stat %s: %w", p, err)
 		}
 	}
-	return newTarSource(paths, git)
+	src, err := newTarSource(paths, git)
+	if err != nil {
+		return nil, fmt.Errorf("opening tar source: %w", err)
+	}
+	return finalizeSource(src, opts)
+}
+
+// finalizeSource applies the user's options to a freshly-built Source. It
+// installs the progress counter (if any) on the inner reader so callbacks
+// fire on uncompressed bytes, then picks the codec from the preamble shape
+// and mode, wraps the reader if zstd, and records Compression on the
+// preamble. Preamble.Size keeps the user-visible (uncompressed) byte count
+// regardless of codec — it drives a continuous progress percentage on the
+// receiver even when compression hides the wire byte count. If wrap fails,
+// the Source's reader is closed and the error is returned.
+func finalizeSource(src *Source, opts SourceOptions) (*Source, error) {
+	if opts.Progress != nil {
+		// Layer order matters: counter must sit between the user's reader
+		// and the encoder so the count reflects uncompressed bytes.
+		src.Reader = &countingReadCloser{r: src.Reader, cb: opts.Progress}
+	}
+	codec := pickCompression(src.Preamble, opts.Compression)
+	src.Preamble.Compression = codec
+	wrapped, err := wrapEncode(src.Reader, codec)
+	if err != nil {
+		return nil, fmt.Errorf("finalizing source: %w", err)
+	}
+	src.Reader = wrapped
+	return src, nil
+}
+
+// countingReadCloser wraps an io.ReadCloser, invoking cb with the cumulative
+// byte count after each successful Read. Used inside finalizeSource so the
+// progress callback observes uncompressed (user-visible) byte counts.
+type countingReadCloser struct {
+	r  io.ReadCloser
+	cb func(int64)
+	n  int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 {
+		c.n += int64(n)
+		if c.cb != nil {
+			c.cb(c.n)
+		}
+	}
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error {
+	if err := c.r.Close(); err != nil {
+		return fmt.Errorf("closing counting reader: %w", err)
+	}
+	return nil
 }
 
 // newTarSource returns a Source whose Reader is the read end of an io.Pipe;
@@ -141,7 +226,7 @@ func newTarSource(paths []string, git bool) (*Source, error) {
 		name = fmt.Sprintf("%s (+%d)", filepath.Base(paths[0]), len(paths)-1)
 	}
 	return &Source{
-		Preamble: wire.Preamble{Kind: wire.PreambleKindTar, Name: name, Size: -1, MIME: "application/x-tar"},
+		Preamble: wire.Preamble{Kind: wire.PreambleKindTar, Name: name, Size: -1, MIME: "application/x-tar", Compression: wire.PreambleCompressionNone},
 		Reader:   pr,
 	}, nil
 }

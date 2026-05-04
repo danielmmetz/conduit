@@ -14,9 +14,10 @@ func TestPreambleRoundTrip(t *testing.T) {
 		name string
 		pre  Preamble
 	}{
-		{"file", Preamble{Kind: PreambleKindFile, Name: "report.pdf", Size: 12345, MIME: "application/pdf"}},
-		{"text", Preamble{Kind: PreambleKindText, Size: 5}},
-		{"tar streaming", Preamble{Kind: PreambleKindTar, Name: "src", Size: -1}},
+		{"file", Preamble{Kind: PreambleKindFile, Name: "report.pdf", Size: 12345, MIME: "application/pdf", Compression: PreambleCompressionNone}},
+		{"text", Preamble{Kind: PreambleKindText, Size: 5, Compression: PreambleCompressionNone}},
+		{"tar streaming", Preamble{Kind: PreambleKindTar, Name: "src", Size: -1, Compression: PreambleCompressionNone}},
+		{"file zstd", Preamble{Kind: PreambleKindFile, Name: "logs.txt", Size: 4096, MIME: "text/plain", Compression: PreambleCompressionZstd}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -39,7 +40,7 @@ func TestPreambleRoundTrip(t *testing.T) {
 func TestReadPreambleTrailingBytes(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := WritePreamble(&buf, Preamble{Kind: PreambleKindFile, Name: "a", Size: 3}); err != nil {
+	if err := WritePreamble(&buf, Preamble{Kind: PreambleKindFile, Name: "a", Size: 3, Compression: PreambleCompressionNone}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	buf.WriteString("payload") // simulates streaming payload after preamble
@@ -83,9 +84,27 @@ func TestReadPreambleShortBody(t *testing.T) {
 
 func TestWritePreambleRejectsOversized(t *testing.T) {
 	t.Parallel()
-	big := Preamble{Kind: PreambleKindFile, Name: strings.Repeat("x", MaxPreambleBody+1)}
+	big := Preamble{Kind: PreambleKindFile, Name: strings.Repeat("x", MaxPreambleBody+1), Compression: PreambleCompressionNone}
 	err := WritePreamble(io.Discard, big)
 	if err == nil || !strings.Contains(err.Error(), "max") {
 		t.Fatalf("WritePreamble oversized = %v, want max-size error", err)
+	}
+}
+
+func TestValidatePreambleAcceptsKnownCompression(t *testing.T) {
+	t.Parallel()
+	for _, c := range []string{PreambleCompressionNone, PreambleCompressionZstd} {
+		if err := ValidatePreamble(Preamble{Kind: PreambleKindFile, Compression: c}); err != nil {
+			t.Errorf("ValidatePreamble compression=%q = %v, want nil", c, err)
+		}
+	}
+}
+
+func TestValidatePreambleRejectsUnknownCompression(t *testing.T) {
+	t.Parallel()
+	for _, c := range []string{"", "lz77", "gzip"} {
+		if err := ValidatePreamble(Preamble{Kind: PreambleKindFile, Compression: c}); err == nil {
+			t.Errorf("ValidatePreamble compression=%q = nil, want error", c)
+		}
 	}
 }

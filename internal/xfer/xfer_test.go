@@ -16,7 +16,10 @@ import (
 
 func TestOpenTextSource(t *testing.T) {
 	t.Parallel()
-	s := xfer.OpenText("hello world")
+	s, err := xfer.OpenText("hello world", xfer.SourceOptions{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
 	defer s.Close()
 	if s.Preamble.Kind != wire.PreambleKindText || s.Preamble.Size != 11 {
 		t.Fatalf("preamble = %+v", s.Preamble)
@@ -38,7 +41,7 @@ func TestOpenPathsSingleFile(t *testing.T) {
 	if err := os.WriteFile(path, payload, 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	s, err := xfer.OpenPaths([]string{path}, nil, false)
+	s, err := xfer.OpenPaths([]string{path}, nil, false, xfer.SourceOptions{Compression: xfer.CompressNone})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -58,7 +61,7 @@ func TestOpenPathsSingleFile(t *testing.T) {
 func TestOpenPathsStdin(t *testing.T) {
 	t.Parallel()
 	in := strings.NewReader("from stdin")
-	s, err := xfer.OpenPaths([]string{xfer.StdinMarker}, in, false)
+	s, err := xfer.OpenPaths([]string{xfer.StdinMarker}, in, false, xfer.SourceOptions{Compression: xfer.CompressNone})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -81,7 +84,7 @@ func TestOpenPathsDirectoryStreamsTar(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "a.txt"), "alpha")
 	mustWrite(t, filepath.Join(root, "nested", "b.txt"), "bravo")
 
-	s, err := xfer.OpenPaths([]string{root}, nil, false)
+	s, err := xfer.OpenPaths([]string{root}, nil, false, xfer.SourceOptions{Compression: xfer.CompressNone})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -116,7 +119,7 @@ func TestOpenPathsMultipleFilesStreamsTar(t *testing.T) {
 	mustWrite(t, p1, "1")
 	mustWrite(t, p2, "22")
 
-	s, err := xfer.OpenPaths([]string{p1, p2}, nil, false)
+	s, err := xfer.OpenPaths([]string{p1, p2}, nil, false, xfer.SourceOptions{Compression: xfer.CompressNone})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -144,7 +147,7 @@ func TestOpenPathsStdinWithOtherPaths(t *testing.T) {
 	tmp := t.TempDir()
 	p := filepath.Join(tmp, "a.txt")
 	mustWrite(t, p, "x")
-	_, err := xfer.OpenPaths([]string{xfer.StdinMarker, p}, nil, false)
+	_, err := xfer.OpenPaths([]string{xfer.StdinMarker, p}, nil, false, xfer.SourceOptions{Compression: xfer.CompressNone})
 	if err == nil {
 		t.Fatal("expected error when mixing stdin with other paths")
 	}
@@ -207,7 +210,7 @@ func TestOpenSinkRejectsTarTraversal(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	sink, err := xfer.OpenSink(wire.Preamble{Kind: wire.PreambleKindTar}, xfer.SinkOptions{OutPath: root})
+	sink, err := xfer.OpenSink(wire.Preamble{Kind: wire.PreambleKindTar, Compression: wire.PreambleCompressionNone}, xfer.SinkOptions{OutPath: root})
 	if err != nil {
 		t.Fatalf("open sink: %v", err)
 	}
@@ -242,7 +245,7 @@ func TestOpenSinkRejectsAbsolutePath(t *testing.T) {
 		t.Fatalf("tar close: %v", err)
 	}
 	root := t.TempDir()
-	sink, err := xfer.OpenSink(wire.Preamble{Kind: wire.PreambleKindTar}, xfer.SinkOptions{OutPath: root})
+	sink, err := xfer.OpenSink(wire.Preamble{Kind: wire.PreambleKindTar, Compression: wire.PreambleCompressionNone}, xfer.SinkOptions{OutPath: root})
 	if err != nil {
 		t.Fatalf("open sink: %v", err)
 	}
@@ -264,7 +267,7 @@ func TestOpenSinkRejectsSymlinkEntry(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 	root := t.TempDir()
-	sink, err := xfer.OpenSink(wire.Preamble{Kind: wire.PreambleKindTar}, xfer.SinkOptions{OutPath: root})
+	sink, err := xfer.OpenSink(wire.Preamble{Kind: wire.PreambleKindTar, Compression: wire.PreambleCompressionNone}, xfer.SinkOptions{OutPath: root})
 	if err != nil {
 		t.Fatalf("open sink: %v", err)
 	}
@@ -282,7 +285,7 @@ func TestOpenSinkFileDefaultsToPreambleName(t *testing.T) {
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
-	pre := wire.Preamble{Kind: wire.PreambleKindFile, Name: "hello.bin", Size: 5}
+	pre := wire.Preamble{Kind: wire.PreambleKindFile, Name: "hello.bin", Size: 5, Compression: wire.PreambleCompressionNone}
 	sink, err := xfer.OpenSink(pre, xfer.SinkOptions{})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -299,7 +302,7 @@ func TestOpenSinkFileDefaultsToPreambleName(t *testing.T) {
 func TestOpenSinkTextStdoutPadsMissingNewline(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	pre := wire.Preamble{Kind: wire.PreambleKindText, Size: 5}
+	pre := wire.Preamble{Kind: wire.PreambleKindText, Size: 5, Compression: wire.PreambleCompressionNone}
 	sink, err := xfer.OpenSink(pre, xfer.SinkOptions{OutPath: xfer.StdoutMarker, Stdout: &out})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -318,7 +321,7 @@ func TestOpenSinkTextStdoutPadsMissingNewline(t *testing.T) {
 func TestOpenSinkTextStdoutKeepsExistingNewline(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	pre := wire.Preamble{Kind: wire.PreambleKindText, Size: 6}
+	pre := wire.Preamble{Kind: wire.PreambleKindText, Size: 6, Compression: wire.PreambleCompressionNone}
 	sink, err := xfer.OpenSink(pre, xfer.SinkOptions{OutPath: xfer.StdoutMarker, Stdout: &out})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -337,7 +340,7 @@ func TestOpenSinkTextStdoutKeepsExistingNewline(t *testing.T) {
 func TestOpenSinkFileStdoutNoPadding(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	pre := wire.Preamble{Kind: wire.PreambleKindFile, Name: "blob.bin", Size: 5}
+	pre := wire.Preamble{Kind: wire.PreambleKindFile, Name: "blob.bin", Size: 5, Compression: wire.PreambleCompressionNone}
 	sink, err := xfer.OpenSink(pre, xfer.SinkOptions{OutPath: xfer.StdoutMarker, Stdout: &out})
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -355,7 +358,7 @@ func TestOpenSinkFileStdoutNoPadding(t *testing.T) {
 
 func TestOpenSinkTarStdoutRejected(t *testing.T) {
 	t.Parallel()
-	_, err := xfer.OpenSink(wire.Preamble{Kind: wire.PreambleKindTar}, xfer.SinkOptions{OutPath: xfer.StdoutMarker})
+	_, err := xfer.OpenSink(wire.Preamble{Kind: wire.PreambleKindTar, Compression: wire.PreambleCompressionNone}, xfer.SinkOptions{OutPath: xfer.StdoutMarker})
 	if err == nil {
 		t.Fatal("expected error for tar→stdout")
 	}
@@ -394,7 +397,7 @@ func checkAbsent(t *testing.T, path string) {
 // files survive the walk.
 func extractDirSend(t *testing.T, root string, git bool) string {
 	t.Helper()
-	s, err := xfer.OpenPaths([]string{root}, nil, git)
+	s, err := xfer.OpenPaths([]string{root}, nil, git, xfer.SourceOptions{Compression: xfer.CompressNone})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

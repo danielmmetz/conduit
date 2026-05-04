@@ -202,10 +202,11 @@ func TestRecvWatchMultipleSenders(t *testing.T) {
 			t.Fatalf("sender %d open: %v", i, err)
 		}
 		pre := wire.Preamble{
-			Kind: wire.PreambleKindFile,
-			Name: name,
-			Size: int64(len(payload)),
-			MIME: "application/octet-stream",
+			Kind:        wire.PreambleKindFile,
+			Name:        name,
+			Size:        int64(len(payload)),
+			MIME:        "application/octet-stream",
+			Compression: wire.PreambleCompressionNone,
 		}
 		if err := sess.Push(ctx, pre, bytes.NewReader(payload)); err != nil {
 			sess.Close(ctx)
@@ -284,10 +285,11 @@ func TestRecvWatchJoinerMultiplePushes(t *testing.T) {
 		for i := range 2 {
 			payload := fmt.Appendf(nil, "transfer %d\n", i)
 			pre := wire.Preamble{
-				Kind: wire.PreambleKindFile,
-				Name: fmt.Sprintf("transfer-%d.bin", i),
-				Size: int64(len(payload)),
-				MIME: "application/octet-stream",
+				Kind:        wire.PreambleKindFile,
+				Name:        fmt.Sprintf("transfer-%d.bin", i),
+				Size:        int64(len(payload)),
+				MIME:        "application/octet-stream",
+				Compression: wire.PreambleCompressionNone,
 			}
 			if err := sess.Push(ctx, pre, bytes.NewReader(payload)); err != nil {
 				senderDone <- err

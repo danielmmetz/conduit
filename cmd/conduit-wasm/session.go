@@ -17,6 +17,7 @@ import (
 
 	"github.com/danielmmetz/conduit/internal/client"
 	"github.com/danielmmetz/conduit/internal/wire"
+	"github.com/danielmmetz/conduit/internal/xfer"
 )
 
 // sessionRegistry holds open client.Session handles keyed by an opaque
@@ -249,10 +250,11 @@ func (b *wasmBridge) sessionPushFileJS(args []js.Value) any {
 	}
 
 	preamble := wire.Preamble{
-		Kind: wire.PreambleKindFile,
-		Name: filename,
-		Size: int64(len(payload)),
-		MIME: mimeType,
+		Kind:        wire.PreambleKindFile,
+		Name:        filename,
+		Size:        int64(len(payload)),
+		MIME:        mimeType,
+		Compression: wire.PreambleCompressionNone,
 	}
 	src := wrapWithProgress(bytes.NewReader(payload), int64(len(payload)), onProgress)
 	b.startOp(func() {
@@ -370,10 +372,11 @@ func (b *wasmBridge) sessionPushTarJS(args []js.Value) any {
 	}
 
 	preamble := wire.Preamble{
-		Kind: wire.PreambleKindTar,
-		Name: displayName,
-		Size: int64(buf.Len()),
-		MIME: "application/x-tar",
+		Kind:        wire.PreambleKindTar,
+		Name:        displayName,
+		Size:        int64(buf.Len()),
+		MIME:        "application/x-tar",
+		Compression: wire.PreambleCompressionNone,
 	}
 	src := wrapWithProgress(bytes.NewReader(buf.Bytes()), int64(buf.Len()), onProgress)
 	b.startOp(func() {
@@ -421,9 +424,10 @@ func (b *wasmBridge) sessionPushTextJS(args []js.Value) any {
 	}
 	payload := []byte(text)
 	preamble := wire.Preamble{
-		Kind: wire.PreambleKindText,
-		Size: int64(len(payload)),
-		MIME: "text/plain; charset=utf-8",
+		Kind:        wire.PreambleKindText,
+		Size:        int64(len(payload)),
+		MIME:        "text/plain; charset=utf-8",
+		Compression: wire.PreambleCompressionNone,
 	}
 	src := wrapWithProgress(bytes.NewReader(payload), int64(len(payload)), onProgress)
 	b.startOp(func() {
@@ -486,15 +490,26 @@ func makeWasmSinkOpener(onStart, onProgress, onEnd js.Value) client.SinkOpener {
 		return nil
 	}
 	return func(p wire.Preamble) (io.WriteCloser, error) {
-		if onStart.Type() == js.TypeFunction {
-			safeInvoke(onStart, preambleObj(p))
-		}
-		return &wasmTransferSink{
+		sink := &wasmTransferSink{
 			buf:        &bytes.Buffer{},
 			preamble:   p,
 			onProgress: onProgress,
 			onEnd:      onEnd,
-		}, nil
+		}
+		// WrapDecode is a no-op for compression == "none"; for "zstd" it
+		// decodes wire bytes before they reach the buffer so onProgress
+		// counts uncompressed bytes (matching p.Size) and onEnd delivers
+		// the user's original payload. Done before onStart so a setup
+		// failure doesn't leave JS staring at a "transfer started" row
+		// that will never receive an end event.
+		decoded, err := xfer.WrapDecode(sink, p.Compression)
+		if err != nil {
+			return nil, fmt.Errorf("wrapping decoder: %w", err)
+		}
+		if onStart.Type() == js.TypeFunction {
+			safeInvoke(onStart, preambleObj(p))
+		}
+		return decoded, nil
 	}
 }
 

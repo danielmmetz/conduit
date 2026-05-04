@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -67,13 +68,14 @@ func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out, stder
 
 func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
-	var server, text string
+	var server, text, compressFlag string
 	var showQR, git bool
 	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&text, "text", "", "text payload to send instead of a file")
 	fs.BoolVar(&showQR, "qr", false, "after printing the code, render a QR of the browser URL for scanning from a phone")
 	fs.BoolVar(&git, "git", true, "for directory sends, honor a root .gitignore and skip .git/; --git=false sends the tree verbatim")
+	fs.StringVar(&compressFlag, "compress", "auto", "payload compression: auto (zstd unless the MIME is already compressed), zstd (force on), none (force off)")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
 	return &ffcli.Command{
 		Name:       "send",
@@ -82,13 +84,30 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
-			src, err := openSource(text, args, stdin, git)
+			mode, err := parseCompressMode(compressFlag)
+			if err != nil {
+				return fmt.Errorf("running send: %w", err)
+			}
+			pr := newProgressLine(stderr, "↑")
+			defer pr.Done()
+			// Progress is driven by uncompressed bytes read from the user's
+			// source — installed by xfer inside finalizeSource upstream of
+			// the encoder. The total comes from Preamble.Size (user-visible
+			// bytes; -1 for streaming tar / stdin → byte counter only).
+			// total is atomic because the encoder goroutine inside finalizeSource
+			// can begin reading (and firing the callback) before openSource
+			// returns and we learn Preamble.Size on the main goroutine.
+			var total atomic.Int64
+			progress := func(n int64) { pr.Update(n, total.Load()) }
+			src, err := openSource(text, args, stdin, git, xfer.SourceOptions{
+				Compression: mode,
+				Progress:    progress,
+			})
 			if err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
 			defer src.Close()
-			pr := newProgressLine(stderr, "↑")
-			defer pr.Done()
+			total.Store(src.Preamble.Size)
 			onCode := func(code string) {
 				fmt.Fprintf(out, "code: %s\n", code)
 				page, pageErr := receivePageURL(server, code)
@@ -109,14 +128,31 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 			}
 			defer sess.Close(ctx)
 			fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
-			pr.Update(0, src.Preamble.Size)
+			totalSize := total.Load()
+			pr.Update(0, totalSize)
 			if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
-			pr.Update(src.Preamble.Size, src.Preamble.Size)
+			if totalSize > 0 {
+				pr.Update(totalSize, totalSize)
+			}
 			pr.Finish(" ✓")
 			return nil
 		},
+	}
+}
+
+// parseCompressMode maps the --compress flag string to xfer.CompressMode.
+func parseCompressMode(s string) (xfer.CompressMode, error) {
+	switch strings.ToLower(s) {
+	case "auto":
+		return xfer.CompressAuto, nil
+	case "zstd":
+		return xfer.CompressZstd, nil
+	case "none", "off":
+		return xfer.CompressNone, nil
+	default:
+		return 0, fmt.Errorf("invalid --compress %q (want auto, zstd, or none)", s)
 	}
 }
 
@@ -168,30 +204,29 @@ func runRecvOnce(ctx context.Context, logger *slog.Logger, server string, policy
 	} else if len(args) > 1 {
 		return fmt.Errorf("usage: conduit recv <code> [-]")
 	}
-	opts := xfer.SinkOptions{OutPath: sinkOutPath, Stdout: out}
 	pr := newProgressLine(stderr, "↓")
 	defer pr.Done()
 	done := make(chan error, 1)
 	var writtenAnnounce string
 	open := func(pre wire.Preamble) (io.WriteCloser, error) {
-		sink, err := xfer.OpenSink(pre, opts)
-		if err != nil {
-			done <- err
-			return nil, err
-		}
 		// Skip progress when the sink writes to stdout — the progress
 		// line uses \r and would overwrite the payload the user is
 		// trying to read. Disk-bound transfers still get the meter.
 		toStdout := sinkWritesToStdout(pre, sinkOutPath)
-		var cb func(int64)
+		opts := xfer.SinkOptions{OutPath: sinkOutPath, Stdout: out}
 		if !toStdout {
 			totalSize := pre.Size
-			cb = func(received int64) { pr.Update(received, totalSize) }
+			opts.Progress = func(received int64) { pr.Update(received, totalSize) }
 			writtenAnnounce = sinkAnnounceName(pre, sinkOutPath)
 		}
+		sink, err := xfer.OpenSink(pre, opts)
+		if err != nil {
+			err = fmt.Errorf("opening sink: %w", err)
+			done <- err
+			return nil, err
+		}
 		return &finalizingSink{
-			w:  sink,
-			cb: cb,
+			w: sink,
 			onClose: func() error {
 				done <- nil
 				return nil
@@ -375,23 +410,21 @@ func runRecvWatchHost(ctx context.Context, logger *slog.Logger, server string, p
 func makeWatchSinkOpener(dir string, out, stderr io.Writer) client.SinkOpener {
 	return func(pre wire.Preamble) (io.WriteCloser, error) {
 		sinkOutPath := watchSinkOutPath(pre, dir)
+		toStdout := sinkWritesToStdout(pre, sinkOutPath)
+		pr := newProgressLine(stderr, "↓")
+		var announce string
 		opts := xfer.SinkOptions{OutPath: sinkOutPath, Stdout: out}
+		if !toStdout {
+			totalSize := pre.Size
+			opts.Progress = func(received int64) { pr.Update(received, totalSize) }
+			announce = sinkAnnounceName(pre, sinkOutPath)
+		}
 		sink, err := xfer.OpenSink(pre, opts)
 		if err != nil {
 			return nil, fmt.Errorf("opening sink: %w", err)
 		}
-		toStdout := sinkWritesToStdout(pre, sinkOutPath)
-		pr := newProgressLine(stderr, "↓")
-		var cb func(int64)
-		var announce string
-		if !toStdout {
-			totalSize := pre.Size
-			cb = func(received int64) { pr.Update(received, totalSize) }
-			announce = sinkAnnounceName(pre, sinkOutPath)
-		}
 		return &watchSink{
 			w:        sink,
-			cb:       cb,
 			pr:       pr,
 			toStdout: toStdout,
 			announce: announce,
@@ -419,28 +452,24 @@ func watchSinkOutPath(pre wire.Preamble, dir string) string {
 	}
 }
 
-// watchSink wraps the per-transfer xfer.OpenSink output with progress
-// reporting and a final "wrote <name>" announcement. Used by recv --watch
-// where each transfer within the session should land independently.
+// watchSink wraps the per-transfer xfer.OpenSink output with a final
+// "wrote <name>" announcement. Used by recv --watch where each transfer
+// within the session should land independently. Progress is driven via
+// xfer.SinkOptions.Progress on the underlying sink, not here.
 type watchSink struct {
 	w        io.WriteCloser
-	cb       func(int64)
 	pr       *progressLine
 	toStdout bool
 	announce string
 	out      io.Writer
-	n        int64
 }
 
 func (w *watchSink) Write(b []byte) (int, error) {
 	n, err := w.w.Write(b)
-	if n > 0 {
-		w.n += int64(n)
-		if w.cb != nil {
-			w.cb(w.n)
-		}
+	if err != nil {
+		return n, fmt.Errorf("writing watch sink: %w", err)
 	}
-	return n, err
+	return n, nil
 }
 
 func (w *watchSink) Close() error {
@@ -458,17 +487,21 @@ func (w *watchSink) Close() error {
 
 // openSource resolves the payload Source from --text, positional paths, or "-"
 // stdin. Exactly one route must apply; mixing --text with paths is an error.
-func openSource(text string, args []string, stdin io.Reader, git bool) (*xfer.Source, error) {
+func openSource(text string, args []string, stdin io.Reader, git bool, opts xfer.SourceOptions) (*xfer.Source, error) {
 	if text != "" && len(args) > 0 {
 		return nil, fmt.Errorf("resolving send source: pass either --text or a path, not both")
 	}
 	if text != "" {
-		return xfer.OpenText(text), nil
+		src, err := xfer.OpenText(text, opts)
+		if err != nil {
+			return nil, fmt.Errorf("resolving send source: %w", err)
+		}
+		return src, nil
 	}
 	if len(args) == 0 {
 		return nil, fmt.Errorf("resolving send source: pass --text <message>, one or more paths, or '-' for stdin")
 	}
-	src, err := xfer.OpenPaths(args, stdin, git)
+	src, err := xfer.OpenPaths(args, stdin, git, opts)
 	if err != nil {
 		return nil, fmt.Errorf("resolving send source: %w", err)
 	}
@@ -721,48 +754,22 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), units[exp])
 }
 
-// progressSink wraps an io.WriteCloser, invoking cb with the cumulative byte
-// count after each successful Write so the receive command can render
-// progressive progress without changing the rtc / client signatures.
-type progressSink struct {
-	w  io.WriteCloser
-	cb func(int64)
-	n  int64
-}
-
-func (p *progressSink) Write(b []byte) (int, error) {
-	n, err := p.w.Write(b)
-	if n > 0 {
-		p.n += int64(n)
-		if p.cb != nil {
-			p.cb(p.n)
-		}
-	}
-	return n, err
-}
-
-func (p *progressSink) Close() error { return p.w.Close() }
-
-// finalizingSink wraps a writable sink with a progress callback and an
-// onClose hook fired after the sink's own Close. The receive command uses
-// this to learn when the first transfer's payload has been fully flushed
-// to disk so it can return out of its Wait-for-first-transfer loop.
+// finalizingSink wraps a writable sink with an onClose hook fired after
+// the sink's own Close. The receive command uses this to learn when the
+// first transfer's payload has been fully flushed to disk so it can return
+// out of its Wait-for-first-transfer loop. Progress is driven via
+// xfer.SinkOptions.Progress on the underlying sink, not here.
 type finalizingSink struct {
 	w       io.WriteCloser
-	cb      func(int64)
 	onClose func() error
-	n       int64
 }
 
 func (p *finalizingSink) Write(b []byte) (int, error) {
 	n, err := p.w.Write(b)
-	if n > 0 {
-		p.n += int64(n)
-		if p.cb != nil {
-			p.cb(p.n)
-		}
+	if err != nil {
+		return n, fmt.Errorf("writing finalizing sink: %w", err)
 	}
-	return n, err
+	return n, nil
 }
 
 func (p *finalizingSink) Close() error {

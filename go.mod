@@ -10,6 +10,7 @@ require github.com/peterbourgon/ff/v3 v3.4.0
 
 require (
 	filippo.io/age v1.3.1
+	github.com/klauspost/compress v1.18.6
 	github.com/pion/ice/v4 v4.2.2
 	github.com/pion/webrtc/v4 v4.2.11
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
