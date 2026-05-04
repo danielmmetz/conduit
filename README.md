@@ -1,6 +1,6 @@
 # conduit
 
-Encrypted file and text transfer between two peers. A short code pairs them through a signaling server; [SPAKE2](https://www.rfc-editor.org/rfc/rfc9382) turns that code into a shared session key the server never sees; [age](https://age-encryption.org) encrypts the payload. Peers connect directly via WebRTC when possible; a TURN relay forwards opaque ciphertext when they can't.
+Encrypted file and text transfer between two peers. A short code pairs them through a signaling server; [SPAKE2](https://www.rfc-editor.org/rfc/rfc9382) turns that code into a shared session key the server never sees; [age](https://age-encryption.org) encrypts the payload, with zstd compression applied transparently when it pays off. Peers connect directly via WebRTC when possible; a TURN relay forwards opaque ciphertext when they can't.
 
 ## How it works
 
@@ -9,6 +9,8 @@ Encrypted file and text transfer between two peers. A short code pairs them thro
 **Key establishment.** Both peers run SPAKE2 over the relay, using the word portion of the code as the password. This produces a shared 32-byte session key via HKDF. A passive observer (including the relay) sees only the SPAKE2 messages, which reveal nothing about the key. An active attacker intercepting the handshake would need to guess the word password before the transfer completes.
 
 **Encryption.** The session key is used as an [age](https://age-encryption.org) scrypt passphrase. Everything that follows — ICE candidates, file metadata, file contents, progress acknowledgments — is encrypted before leaving either peer. The relay forwards ciphertext only; filenames and sizes are never visible to it.
+
+**Compression.** Payloads are zstd-compressed before encryption when it's likely to help (tar streams, uncompressed file types) and skipped for already-compressed formats and stdin pipes where the codec overhead would outweigh the gain. The receiver decodes transparently, and progress meters report uncompressed bytes either way.
 
 **Transport.** Peers exchange ICE candidates through the encrypted channel to attempt a direct WebRTC data channel. If NAT traversal succeeds they connect peer-to-peer; otherwise a TURN relay forwards the encrypted stream.
 
