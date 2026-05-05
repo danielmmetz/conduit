@@ -37,7 +37,7 @@ func TestSessionRoundTrip(t *testing.T) {
 	senderRes := make(chan opened, 1)
 	receiverRes := make(chan opened, 1)
 	go func() {
-		s, err := client.OpenSender(ctx, logger.With("role", "sender"), ts.URL, client.RelayAuto, func(code string) { codeCh <- code }, nil)
+		s, err := client.OpenSender(ctx, logger.With("role", "sender"), ts.URL, client.RelayAuto, func(code string) { codeCh <- code }, nil, nil)
 		senderRes <- opened{s, err}
 	}()
 	code := <-codeCh
@@ -136,7 +136,7 @@ func TestSessionMultiPushSameDirection(t *testing.T) {
 	senderRes := make(chan opened, 1)
 	receiverRes := make(chan opened, 1)
 	go func() {
-		s, err := client.OpenSender(ctx, logger.With("role", "sender"), ts.URL, client.RelayAuto, func(code string) { codeCh <- code }, nil)
+		s, err := client.OpenSender(ctx, logger.With("role", "sender"), ts.URL, client.RelayAuto, func(code string) { codeCh <- code }, nil, nil)
 		senderRes <- opened{s, err}
 	}()
 	code := <-codeCh

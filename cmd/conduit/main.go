@@ -102,23 +102,29 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 			// can begin reading (and firing the callback) before openSource
 			// returns and we learn Preamble.Size on the main goroutine.
 			//
-			// The meter stays hidden until pairing completes. Without that
-			// gate, a small payload that fits in the zstd encoder's input
-			// buffer races to 100% before the slot is even reserved — and if
-			// OpenSender fails or hangs, the user is left staring at a full
-			// progress bar with no code.
+			// Drive the meter from peer acks rather than source-side reads.
+			// The encoder buffers the source internally — for small payloads
+			// the entire input is consumed before the slot is reserved, so
+			// source-side progress would race to 100% before the receiver
+			// has seen a byte. Acks fire from the rtc demuxer goroutine
+			// after the receiver flushes per-chunk + final ack frames, so
+			// the meter advances in lockstep with the peer.
+			//
+			// Caveat: ack counts are wire bytes (post-compression), and the
+			// displayed total stays as preamble.Size (uncompressed). For a
+			// compressed transfer the percentage lags real progress and
+			// jumps to 100% via the explicit pr.Update after Push returns.
+			// Acceptable trade-off until the protocol carries
+			// post-decompression acks.
 			var total atomic.Int64
-			var sourceBytes atomic.Int64
 			var paired atomic.Bool
-			progress := func(n int64) {
-				sourceBytes.Store(n)
+			onAckProgress := func(n int64) {
 				if paired.Load() {
 					pr.Update(n, total.Load())
 				}
 			}
 			src, err := openSource(text, args, stdin, git, xfer.SourceOptions{
 				Compression: mode,
-				Progress:    progress,
 			})
 			if err != nil {
 				return fmt.Errorf("running send: %w", err)
@@ -139,18 +145,17 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 				}
 				fmt.Fprintln(out, "waiting for receiver... (ctrl-c to cancel)")
 			}
-			sess, err := client.OpenSender(ctx, logger, server, policy, onCode, nil)
+			sess, err := client.OpenSender(ctx, logger, server, policy, onCode, nil, onAckProgress)
 			if err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
 			defer sess.Close(ctx)
 			fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
 			totalSize := total.Load()
-			// Render the meter for the first time now that we're paired —
-			// catch up to any bytes the encoder has already consumed so the
-			// initial line reflects reality.
+			// Render an initial line at 0% now that we're paired so the user
+			// sees something immediately; subsequent updates come from acks.
 			paired.Store(true)
-			pr.Update(sourceBytes.Load(), totalSize)
+			pr.Update(0, totalSize)
 			if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}

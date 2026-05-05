@@ -56,7 +56,14 @@ type Session struct {
 // payload bytes and is closed when the transfer ends. May be nil if the
 // caller will not accept inbound transfers — in that case any inbound
 // transfer terminates the session with an error.
-func OpenSender(ctx context.Context, logger *slog.Logger, server string, policy RelayPolicy, onCode func(code string), onTransfer SinkOpener) (*Session, error) {
+//
+// onAckProgress, if non-nil, fires every time the peer acks more bytes of
+// the current outbound transfer. Drives a peer-confirmed progress meter:
+// the count is wire bytes (post-encryption, post-compression), reset to
+// zero at the start of each Push and counting up as the receiver flushes
+// acks every defaultAckThreshold and once more at tagEOF. Called from the
+// rtc demuxer goroutine — must not block.
+func OpenSender(ctx context.Context, logger *slog.Logger, server string, policy RelayPolicy, onCode func(code string), onTransfer SinkOpener, onAckProgress func(int64)) (*Session, error) {
 	wsURL, err := wsURLFor(server)
 	if err != nil {
 		return nil, fmt.Errorf("resolving websocket URL: %w", err)
@@ -114,9 +121,10 @@ func OpenSender(ctx context.Context, logger *slog.Logger, server string, policy 
 		ice = nil
 	}
 	cfg := rtc.Config{
-		ICEServers:      ice,
-		TransportPolicy: policy.transportPolicy(),
-		Logger:          logger,
+		ICEServers:       ice,
+		TransportPolicy:  policy.transportPolicy(),
+		Logger:           logger,
+		OnRemoteProgress: onAckProgress,
 	}
 	rs, err := rtc.Initiate(ctx, wsMsgConn{conn: conn}, key, cfg)
 	if err != nil {

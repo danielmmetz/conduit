@@ -276,7 +276,7 @@ func TestRecvWatchJoinerMultiplePushes(t *testing.T) {
 	go func() {
 		sess, err := client.OpenSender(ctx, logger, ts.URL, client.RelayAuto, func(code string) {
 			codeCh <- code
-		}, nil)
+		}, nil, nil)
 		if err != nil {
 			senderDone <- err
 			return

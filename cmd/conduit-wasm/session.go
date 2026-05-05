@@ -132,7 +132,7 @@ func (b *wasmBridge) openSenderJS(parent context.Context, args []js.Value) any {
 	b.startOp(func() {
 		sess, err := client.OpenSender(ctx, b.logger, server, client.RelayAuto, func(code string) {
 			safeInvoke(onCode, code)
-		}, openSink)
+		}, openSink, nil)
 		if err != nil {
 			safeInvoke(onError, err.Error())
 			b.sessions.remove(id)
