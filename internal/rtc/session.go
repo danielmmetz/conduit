@@ -394,6 +394,23 @@ func (s *Session) waitAck(ctx context.Context, target int64) error {
 	}
 }
 
+// pullKeepaliveInterval bounds how long the sender's waitAck waits when
+// the body bytes are all delivered but tagEOF hasn't surfaced yet (an
+// SCTP-layer hiccup we've observed on real-world WAN transfers — the
+// large body chunk arrives and is SACKed but the trailing 1-byte tagEOF
+// chunk never makes it up to the receiver's stream queue). On every
+// tick, Pull flushes an ack frame with the current cumulative byte
+// count; once the receiver has consumed everything the sender wrote,
+// that flush carries `n` and the sender's waitAck unblocks. The sender
+// then closes, which sends an SCTP stream reset that the receiver
+// surfaces as EOF on the pipe — age decrypts the partial last chunk
+// via ErrUnexpectedEOF and handleInbound completes cleanly.
+//
+// Picked larger than typical end-to-end latency so healthy transfers
+// still complete on tagEOF (the ticker simply never fires) and slow
+// transfers see at most a handful of extra 9-byte ack frames.
+const pullKeepaliveInterval = 2 * time.Second
+
 // Pull reads one inbound transfer to dst, writing tagAck progress frames
 // back to the peer as bytes accumulate. Returns when the demuxer surfaces
 // the transfer's tagEOF. Not safe to call concurrently with itself.
@@ -408,10 +425,21 @@ func (s *Session) Pull(ctx context.Context, dst io.Writer) error {
 		mu:           &s.writeMu,
 		ackThreshold: defaultAckThreshold,
 	}
+	keepalive := time.NewTicker(pullKeepaliveInterval)
+	defer keepalive.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("pull: %w", ctx.Err())
+		case <-keepalive.C:
+			// Re-emit the running cumulative ack so the sender's
+			// waitAck can make progress even if a trailing tagEOF
+			// got stuck below the application layer. Idempotent —
+			// repeated acks at the same total are harmless on the
+			// peer.
+			if err := aw.flush(); err != nil {
+				return fmt.Errorf("pull: flushing keepalive ack: %w", err)
+			}
 		case frame, ok := <-s.inFrames:
 			if !ok {
 				if s.demuxErr != nil {
