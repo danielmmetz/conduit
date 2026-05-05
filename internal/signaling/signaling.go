@@ -301,8 +301,9 @@ func (s *Server) runSenderPump(ctx context.Context, sl *slot, cancelSlot context
 		}
 		s.mu.Lock()
 		pair := sl.pair
+		recv := pair.receiverConn
 		s.mu.Unlock()
-		if pair.receiverConn == nil {
+		if recv == nil {
 			continue
 		}
 		// Hold the frame until runPairing has sent the paired control
@@ -321,7 +322,7 @@ func (s *Server) runSenderPump(ctx context.Context, sl *slot, cancelSlot context
 		case <-ctx.Done():
 			return
 		}
-		if err := pair.receiverConn.Write(ctx, typ, data); err != nil {
+		if err := recv.Write(ctx, typ, data); err != nil {
 			// The current receiver is gone or stalled; drop the frame.
 			// handleJoin's read-side will close the pair imminently.
 			continue
