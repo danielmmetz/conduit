@@ -419,6 +419,16 @@ func (s *Session) runPump() {
 // runOneInbound consumes one rtc-level inbound transfer. Returns nil after
 // the transfer's tagEOF; io.EOF if the rtc session has ended; otherwise a
 // real error.
+//
+// Closing pr after handleInbound returns is load-bearing: on any
+// non-EOF failure inside the pipeline (decrypt error, openSink error,
+// sink-side write failure) handleInbound returns without draining pr,
+// so Pull's writes back the channel block forever, the demuxer blocks
+// on its inFrames send, and the peer's tagEOF never reaches aw.flush —
+// the peer's Push then sits in waitAck waiting for an ack we'll never
+// emit. Closing pr unblocks Pull's pw.Write so the goroutine can exit,
+// runOneInbound surfaces the real error, and the rtc session can tear
+// down cleanly.
 func (s *Session) runOneInbound(ctx context.Context) error {
 	pr, pw := io.Pipe()
 	pullErr := make(chan error, 1)
@@ -429,6 +439,7 @@ func (s *Session) runOneInbound(ctx context.Context) error {
 	}()
 
 	procErr := s.handleInbound(pr)
+	_ = pr.Close()
 	pullCloseErr := <-pullErr
 
 	if pullCloseErr != nil {
