@@ -370,27 +370,54 @@ func (s *Session) ackChannel() <-chan struct{} {
 	return s.ackBroadcastCh
 }
 
+// waitAckStallTimeout bounds how long waitAck will sit on a non-advancing
+// lastAck before giving up. Real transfers either complete (tagEOF flush
+// covers `n` instantly) or make incremental progress through the
+// receiver's keepalive (every 2s once the receiver has consumed any
+// bytes). If neither happens for this long, the data path is wedged
+// somewhere below the application layer — receiver's pc.Close cascade
+// eventually wakes us via demuxDone, but we shouldn't depend on
+// kernel-level UDP timeouts to surface the failure to the user. Pick
+// long enough that a slow but healthy transfer never trips it: 30s
+// without any ack progress is well past anything pion's congestion
+// control would take to recover from.
+const waitAckStallTimeout = 30 * time.Second
+
 // waitAck blocks until lastAck reaches target, the demuxer exits, or ctx
 // is cancelled. The receiver's flush() at tagEOF emits a final ack
 // covering every byte written, so for a successful transfer this returns
-// promptly after the peer drains the stream.
+// promptly after the peer drains the stream. If lastAck does not advance
+// for waitAckStallTimeout we surface a stall error rather than hang.
 func (s *Session) waitAck(ctx context.Context, target int64) error {
+	lastObserved := s.lastAck.Load()
+	deadline := time.Now().Add(waitAckStallTimeout)
 	for {
 		ch := s.ackChannel()
-		if s.lastAck.Load() >= target {
+		current := s.lastAck.Load()
+		if current >= target {
 			return nil
 		}
+		if current != lastObserved {
+			lastObserved = current
+			deadline = time.Now().Add(waitAckStallTimeout)
+		}
+		stallTimer := time.NewTimer(time.Until(deadline))
 		select {
 		case <-ch:
 			// recordAck fired; loop and re-check lastAck.
 		case <-s.demuxDone:
+			stallTimer.Stop()
 			if s.lastAck.Load() >= target {
 				return nil
 			}
 			return fmt.Errorf("session ended before final ack (acked %d, want %d)", s.lastAck.Load(), target)
 		case <-ctx.Done():
+			stallTimer.Stop()
 			return ctx.Err()
+		case <-stallTimer.C:
+			return fmt.Errorf("transfer stalled: ack did not advance for %v (acked %d, want %d)", waitAckStallTimeout, current, target)
 		}
+		stallTimer.Stop()
 	}
 }
 
