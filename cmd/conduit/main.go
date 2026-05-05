@@ -86,7 +86,7 @@ func sendCmd(logger *slog.Logger, level *slog.LevelVar, stdin io.Reader, out, st
 	fs.BoolVar(&git, "git", true, "for directory sends, honor a root .gitignore and skip .git/; --git=false sends the tree verbatim")
 	fs.StringVar(&compressFlag, "compress", "auto", "payload compression: auto (zstd unless the MIME is already compressed), zstd (force on), none (force off)")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
-	fs.BoolVar(&verbose, "verbose", false, "log per-frame debug events (data channel tx/rx, ack progress) to stderr")
+	fs.BoolVar(&verbose, "verbose", false, "log session lifecycle and ack progress debug events to stderr")
 	return &ffcli.Command{
 		Name:       "send",
 		ShortUsage: "conduit send [--text <message> | <path>... | -] [--server URL]",
@@ -201,7 +201,7 @@ func recvCmd(logger *slog.Logger, level *slog.LevelVar, out, stderr io.Writer) *
 	fs.BoolVar(&watch, "watch", false, "stay open across multiple transfers; without a code the receiver hosts a stable persistent slot, with a code it joins and stays paired through the peer's session (-o must be empty or a directory in either mode)")
 	fs.BoolVar(&showQR, "qr", false, "in --watch host mode, render a QR of the browser URL for scanning from a phone after printing the code")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
-	fs.BoolVar(&verbose, "verbose", false, "log per-frame debug events (data channel tx/rx, ack progress) to stderr")
+	fs.BoolVar(&verbose, "verbose", false, "log session lifecycle and ack progress debug events to stderr")
 	return &ffcli.Command{
 		Name:       "recv",
 		ShortUsage: "conduit recv <code> [-o PATH | -] [--server URL]\n       conduit recv --watch [<code>] [-o DIR] [--server URL]",

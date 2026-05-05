@@ -315,11 +315,6 @@ func (s *Session) runDemux(ctx context.Context) {
 				s.demuxErr = fmt.Errorf("demux: empty data frame")
 				return
 			}
-			s.cfg.Logger.Debug("dc rx tagData",
-				slog.Int("payload", n-1),
-				slog.Int("frame", framesRead),
-				slog.Int64("totalBytes", bytesRead),
-			)
 			payload := append([]byte(nil), msg[1:n]...)
 			s.inFrames <- dataFrame{payload: payload}
 		case tagEOF:
@@ -334,10 +329,6 @@ func (s *Session) runDemux(ctx context.Context) {
 				return
 			}
 			total := int64(binary.BigEndian.Uint64(msg[1:n]))
-			s.cfg.Logger.Debug("dc rx tagAck",
-				slog.Int64("total", total),
-				slog.Int("frame", framesRead),
-			)
 			s.recordAck(total)
 			if s.cfg.OnRemoteProgress != nil {
 				s.cfg.OnRemoteProgress(total)
@@ -713,11 +704,6 @@ func (t *lockedTagWriter) Write(p []byte) (int, error) {
 		}
 		t.frames++
 		t.bytes += int64(len(chunk))
-		t.logger.Debug("dc tx tagData",
-			slog.Int("payload", len(chunk)),
-			slog.Int("frame", t.frames),
-			slog.Int64("totalBytes", t.bytes),
-		)
 		written += len(chunk)
 		p = p[len(chunk):]
 	}
@@ -759,10 +745,6 @@ func (a *sessionAckingWriter) Write(p []byte) (int, error) {
 	if n > 0 {
 		a.written += int64(n)
 		a.sinceLastAck += int64(n)
-		a.logger.Debug("pull consumed payload",
-			slog.Int("bytes", n),
-			slog.Int64("totalConsumed", a.written),
-		)
 		if a.sinceLastAck >= a.ackThreshold {
 			if aerr := a.writeAckLocked(a.written, "threshold"); aerr != nil {
 				return n, fmt.Errorf("emitting ack: %w", aerr)
