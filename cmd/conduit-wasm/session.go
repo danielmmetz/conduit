@@ -250,15 +250,22 @@ func (b *wasmBridge) sessionPushFileJS(args []js.Value) any {
 	}
 
 	preamble := wire.Preamble{
-		Kind:        wire.PreambleKindFile,
-		Name:        filename,
-		Size:        int64(len(payload)),
-		MIME:        mimeType,
-		Compression: wire.PreambleCompressionNone,
+		Kind: wire.PreambleKindFile,
+		Name: filename,
+		Size: int64(len(payload)),
+		MIME: mimeType,
 	}
-	src := wrapWithProgress(bytes.NewReader(payload), int64(len(payload)), onProgress)
+	src, err := xfer.OpenBytes(payload, preamble, xfer.SourceOptions{
+		Compression: xfer.CompressAuto,
+		Progress:    makeJSProgress(onProgress, int64(len(payload))),
+	})
+	if err != nil {
+		safeInvoke(onDone, err.Error())
+		return js.Undefined()
+	}
 	b.startOp(func() {
-		if err := h.sess.Push(h.ctx, preamble, src); err != nil {
+		defer src.Close()
+		if err := h.sess.Push(h.ctx, src.Preamble, src.Reader); err != nil {
 			safeInvoke(onDone, err.Error())
 			return
 		}
@@ -267,19 +274,15 @@ func (b *wasmBridge) sessionPushFileJS(args []js.Value) any {
 	return js.Undefined()
 }
 
-// wrapWithProgress wraps r in a progressReader that fires onProgress
-// (done, total) per Read when onProgress is a JS function. Returns r
-// unchanged otherwise so callers needn't branch on the JS side.
-func wrapWithProgress(r io.Reader, total int64, onProgress js.Value) io.Reader {
+// makeJSProgress wraps a JS callback as an xfer.SourceOptions.Progress
+// function. The Go side gets one cumulative byte count per call; we
+// surface (done, total) to JS for parity with the existing UI throttler.
+func makeJSProgress(onProgress js.Value, total int64) func(int64) {
 	if onProgress.Type() != js.TypeFunction {
-		return r
+		return nil
 	}
-	return &progressReader{
-		r:     r,
-		total: total,
-		onProgress: func(done, total int64) {
-			safeInvoke(onProgress, done, total)
-		},
+	return func(done int64) {
+		safeInvoke(onProgress, done, total)
 	}
 }
 
@@ -372,15 +375,22 @@ func (b *wasmBridge) sessionPushTarJS(args []js.Value) any {
 	}
 
 	preamble := wire.Preamble{
-		Kind:        wire.PreambleKindTar,
-		Name:        displayName,
-		Size:        int64(buf.Len()),
-		MIME:        "application/x-tar",
-		Compression: wire.PreambleCompressionNone,
+		Kind: wire.PreambleKindTar,
+		Name: displayName,
+		Size: int64(buf.Len()),
+		MIME: "application/x-tar",
 	}
-	src := wrapWithProgress(bytes.NewReader(buf.Bytes()), int64(buf.Len()), onProgress)
+	src, err := xfer.OpenBytes(buf.Bytes(), preamble, xfer.SourceOptions{
+		Compression: xfer.CompressAuto,
+		Progress:    makeJSProgress(onProgress, int64(buf.Len())),
+	})
+	if err != nil {
+		safeInvoke(onDone, err.Error())
+		return js.Undefined()
+	}
 	b.startOp(func() {
-		if err := h.sess.Push(h.ctx, preamble, src); err != nil {
+		defer src.Close()
+		if err := h.sess.Push(h.ctx, src.Preamble, src.Reader); err != nil {
 			safeInvoke(onDone, err.Error())
 			return
 		}
@@ -424,14 +434,21 @@ func (b *wasmBridge) sessionPushTextJS(args []js.Value) any {
 	}
 	payload := []byte(text)
 	preamble := wire.Preamble{
-		Kind:        wire.PreambleKindText,
-		Size:        int64(len(payload)),
-		MIME:        "text/plain; charset=utf-8",
-		Compression: wire.PreambleCompressionNone,
+		Kind: wire.PreambleKindText,
+		Size: int64(len(payload)),
+		MIME: "text/plain; charset=utf-8",
 	}
-	src := wrapWithProgress(bytes.NewReader(payload), int64(len(payload)), onProgress)
+	src, err := xfer.OpenBytes(payload, preamble, xfer.SourceOptions{
+		Compression: xfer.CompressAuto,
+		Progress:    makeJSProgress(onProgress, int64(len(payload))),
+	})
+	if err != nil {
+		safeInvoke(onDone, err.Error())
+		return js.Undefined()
+	}
 	b.startOp(func() {
-		if err := h.sess.Push(h.ctx, preamble, src); err != nil {
+		defer src.Close()
+		if err := h.sess.Push(h.ctx, src.Preamble, src.Reader); err != nil {
 			safeInvoke(onDone, err.Error())
 			return
 		}

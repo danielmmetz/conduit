@@ -7,6 +7,7 @@ package xfer
 
 import (
 	"archive/tar"
+	"bytes"
 	"fmt"
 	"io"
 	"mime"
@@ -47,6 +48,23 @@ const StdinMarker = "-"
 type SourceOptions struct {
 	Compression CompressMode
 	Progress    func(int64)
+}
+
+// OpenBytes builds a Source from an in-memory byte slice paired with a
+// caller-supplied preamble. opts.Compression / opts.Progress are honored
+// the same way as for OpenPaths — the preamble's Compression field is
+// overwritten with the codec finalizeSource picks. Used by the WASM
+// bridge, where payloads are already buffered before send so the
+// path-based entry points don't fit. The kind/name/MIME on pre drive
+// pickCompression's auto-mode decision: tar and uncompressed-MIME files
+// get zstd by default, text and already-compressed MIMEs stay raw.
+func OpenBytes(payload []byte, pre wire.Preamble, opts SourceOptions) (*Source, error) {
+	rdr := io.NopCloser(bytes.NewReader(payload))
+	src, err := finalizeSource(&Source{Preamble: pre, Reader: rdr}, opts)
+	if err != nil {
+		return nil, fmt.Errorf("opening bytes source: %w", err)
+	}
+	return src, nil
 }
 
 // OpenText builds a text Source from a literal string. The preamble carries
