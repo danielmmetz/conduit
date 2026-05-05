@@ -674,7 +674,23 @@ type lockedTagWriter struct {
 	bytes  int64
 }
 
-const maxPayloadPerFrame = 64 * 1024
+// maxPayloadPerFrame caps each tagData frame so the resulting SCTP
+// user message fits in a single MTU-sized DATA chunk and pion never
+// needs to fragment. Pion's outboundMTU is 1200 and per-chunk
+// overhead (SCTP common header + DATA chunk header) is 28 bytes,
+// leaving 1172 bytes of useful payload per chunk; a 1-byte tag plus
+// 1024 bytes of payload (1025 total) sits comfortably under that.
+//
+// We chose this aggressive cap after observing real-world WAN
+// stalls where the first multi-fragment message after a stream of
+// single-chunk messages caused the receiver's DTLS read to time
+// out and tear down the association. Whether the root cause is a
+// NAT that drops bursts of UDP packets or a pion SCTP bug
+// triggered by post-fragmentation reassembly, single-chunk frames
+// sidestep it. The cost is one extra tag byte and a tiny amount
+// of pump-loop overhead per kilobyte — under 1% on a 37 KiB
+// payload.
+const maxPayloadPerFrame = 1024
 
 func (t *lockedTagWriter) Write(p []byte) (int, error) {
 	if t.closed {
