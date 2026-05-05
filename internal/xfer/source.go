@@ -239,14 +239,36 @@ func newTarSource(paths []string, git bool) (*Source, error) {
 		}
 	}()
 
-	name := filepath.Base(paths[0])
+	name := tarSourceName(paths[0])
 	if len(paths) > 1 {
-		name = fmt.Sprintf("%s (+%d)", filepath.Base(paths[0]), len(paths)-1)
+		name = fmt.Sprintf("%s (+%d)", name, len(paths)-1)
 	}
 	return &Source{
 		Preamble: wire.Preamble{Kind: wire.PreambleKindTar, Name: name, Size: -1, MIME: "application/x-tar", Compression: wire.PreambleCompressionNone},
 		Reader:   pr,
 	}, nil
+}
+
+// tarSourceName picks a friendly archive name for a source path. filepath.Base
+// returns "." for `.`, ".." for `..`, and "/" for the root — none of those
+// make sensible download filenames on the receiving side. For those cases we
+// resolve the absolute path and use its basename instead, so e.g.
+// `conduit send .` produces an archive named after the current directory.
+// Falls back to "files" only when even the absolute path can't yield a
+// sensible name (e.g. running from "/").
+func tarSourceName(path string) string {
+	name := filepath.Base(filepath.Clean(path))
+	if name != "." && name != ".." && name != string(filepath.Separator) {
+		return name
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		base := filepath.Base(abs)
+		if base != "." && base != string(filepath.Separator) {
+			return base
+		}
+	}
+	return "files"
 }
 
 func writeTarPaths(tw *tar.Writer, paths []string, git bool) error {

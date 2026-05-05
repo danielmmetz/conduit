@@ -111,6 +111,31 @@ func TestOpenPathsDirectoryStreamsTar(t *testing.T) {
 	checkFile(t, filepath.Join(outRoot, base, "nested", "b.txt"), "bravo")
 }
 
+// TestOpenPathsDotPathUsesDirectoryName covers the `conduit send .` case:
+// filepath.Base(".") is "." which is a useless preamble name (the web
+// receiver appends .tar and saves the file as "..tar" → "tar" in the
+// browser). The tar source resolves "." to the absolute path's basename.
+//
+// Cannot t.Parallel: t.Chdir mutates global cwd state.
+func TestOpenPathsDotPathUsesDirectoryName(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "a.txt"), "alpha")
+	t.Chdir(root)
+
+	s, err := xfer.OpenPaths([]string{"."}, nil, false, xfer.SourceOptions{Compression: xfer.CompressNone})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	if s.Preamble.Kind != wire.PreambleKindTar {
+		t.Fatalf("preamble kind = %q, want tar", s.Preamble.Kind)
+	}
+	want := filepath.Base(root)
+	if s.Preamble.Name != want {
+		t.Fatalf("preamble name = %q, want %q", s.Preamble.Name, want)
+	}
+}
+
 func TestOpenPathsMultipleFilesStreamsTar(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
