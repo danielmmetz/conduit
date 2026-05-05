@@ -118,12 +118,12 @@
     };
   }
 
-  function isTextPayload(kind, mime) {
-    if (kind === "text") return true;
-    if (typeof mime === "string" && mime.toLowerCase().startsWith("text/")) {
-      return true;
-    }
-    return false;
+  // Only kind === "text" renders inline. File payloads are always downloaded
+  // even when their MIME starts with text/ — the user explicitly chose to
+  // send a file, and rendering an HTML/CSS/CSV file as a <pre> blob is
+  // rarely what they want.
+  function isTextPayload(kind) {
+    return kind === "text";
   }
 
   function decodeUtf8(bytes) {
@@ -151,6 +151,18 @@
     const parts = name.replace(/\\/g, "/").split("/");
     const base = parts.pop();
     return base || "";
+  }
+
+  // downloadFilename picks the filename the browser saves to. For tar
+  // payloads the sender's preamble.name is the directory basename without a
+  // suffix; appending .tar here means the file extracts cleanly without the
+  // user having to rename it first.
+  function downloadFilename(preamble) {
+    const base = preamble.name || "conduit-received.bin";
+    if (preamble.kind === "tar" && !/\.tar$/i.test(base)) {
+      return base + ".tar";
+    }
+    return base;
   }
 
   function prefersServiceWorkerDownload() {
@@ -467,7 +479,7 @@
       row.bytes.textContent = formatBytes(bytes.byteLength);
       row.status.textContent = "received";
       row.li.classList.add("ok");
-      if (isTextPayload(preamble.kind, preamble.mime)) {
+      if (isTextPayload(preamble.kind)) {
         const text = decodeUtf8(bytes);
         const pre = document.createElement("pre");
         pre.className = "transfer-text-body";
@@ -483,7 +495,7 @@
         row.li.appendChild(copy);
       } else {
         const type = preamble.mime || "application/octet-stream";
-        const outName = preamble.name || "conduit-received.bin";
+        const outName = downloadFilename(preamble);
         const blob = new Blob([bytes], { type });
         const useSw =
           serviceWorkerDownloadOk && navigator.serviceWorker.controller;
