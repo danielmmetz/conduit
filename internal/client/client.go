@@ -3,18 +3,15 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/url"
 	"strings"
 
 	"github.com/coder/websocket"
-	"github.com/danielmmetz/conduit/internal/rtc"
 	"github.com/danielmmetz/conduit/internal/wire"
 	"github.com/pion/webrtc/v4"
 )
@@ -65,164 +62,6 @@ func (r RelayPolicy) transportPolicy() webrtc.ICETransportPolicy {
 // receiver has decoded the preamble. The returned writer receives the
 // plaintext payload bytes; Close is invoked after the bytes are consumed.
 type SinkOpener func(wire.Preamble) (io.WriteCloser, error)
-
-// Send reserves a slot, invokes onCode with the human-readable code (before
-// waiting for the peer), completes PAKE + WebRTC, and streams src to the
-// receiver. The preamble is written inside the age-encrypted stream ahead of
-// the payload so the receiver can pick a sink (single file / tar extractor /
-// stdout) without the server or TURN relay ever observing filenames or sizes.
-// onProgress, if non-nil, is called each time the peer acknowledges additional
-// payload bytes; treat the argument as a cumulative wire-byte total
-// (best-effort). The preamble overhead is subtracted before invoking the
-// callback so the value matches preamble.Size at completion for uncompressed
-// payloads. With compression announced on the preamble, the count reflects
-// compressed wire bytes — callers wanting an uncompressed-byte meter must
-// install a counter on the source upstream of the encoder (see
-// xfer.SourceOptions.Progress).
-func Send(ctx context.Context, logger *slog.Logger, server string, policy RelayPolicy, preamble wire.Preamble, src io.Reader, onCode func(code string), onProgress func(int64)) error {
-	wsURL, err := wsURLFor(server)
-	if err != nil {
-		return fmt.Errorf("resolving websocket URL: %w", err)
-	}
-
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
-	if err != nil {
-		return fmt.Errorf("dialing %s: %w", wsURL, err)
-	}
-	defer conn.CloseNow()
-
-	if err := writeCtl(ctx, conn, wire.ClientHello{Op: wire.OpReserve}); err != nil {
-		return fmt.Errorf("sending reserve: %w", err)
-	}
-
-	reserved, err := readCtl(ctx, conn)
-	if err != nil {
-		return fmt.Errorf("reading reserved: %w", err)
-	}
-	if err := expectOp(reserved, wire.OpReserved); err != nil {
-		return fmt.Errorf("handling reserved frame: %w", err)
-	}
-	logger.DebugContext(ctx, "slot reserved", slog.Uint64("slot", uint64(reserved.Slot)))
-
-	code, err := wire.FormatCode(reserved.Slot)
-	if err != nil {
-		return fmt.Errorf("formatting code: %w", err)
-	}
-	if onCode != nil {
-		onCode(code)
-	}
-
-	parsed, err := wire.ParseCode(code)
-	if err != nil {
-		return fmt.Errorf("parsing formatted code: %w", err)
-	}
-
-	paired, err := readCtl(ctx, conn)
-	if err != nil {
-		return fmt.Errorf("reading paired: %w", err)
-	}
-	if err := expectOp(paired, wire.OpPaired); err != nil {
-		return fmt.Errorf("handling paired frame: %w", err)
-	}
-
-	key, err := wire.SendHandshakeMsg(ctx, wsMsgConn{conn: conn}, parsed)
-	if err != nil {
-		return fmt.Errorf("running pake handshake: %w", err)
-	}
-	logger.DebugContext(ctx, "pake key derived")
-
-	ice := iceServersFromEnvelope(paired)
-	if policy == RelayNone {
-		ice = nil
-	}
-	var preambleBuf bytes.Buffer
-	if err := wire.WritePreamble(&preambleBuf, preamble); err != nil {
-		return fmt.Errorf("framing preamble: %w", err)
-	}
-	// rtc.OnRemoteProgress reports cumulative plaintext bytes acked by the
-	// peer, which includes the preamble framing. Callers care about the
-	// payload count (matches preamble.Size), so strip the preamble overhead
-	// before invoking onProgress and clamp to zero for early acks that land
-	// inside the preamble window.
-	preambleBytes := int64(preambleBuf.Len())
-	wrappedProgress := onProgress
-	if onProgress != nil {
-		wrappedProgress = func(total int64) {
-			onProgress(max(total-preambleBytes, 0))
-		}
-	}
-	cfg := rtc.Config{
-		ICEServers:       ice,
-		TransportPolicy:  policy.transportPolicy(),
-		Logger:           logger,
-		OnRemoteProgress: wrappedProgress,
-	}
-	combined := io.MultiReader(&preambleBuf, src)
-	if err := rtc.Send(ctx, wsMsgConn{conn: conn}, key, cfg, combined); err != nil {
-		return fmt.Errorf("sending payload: %w", err)
-	}
-	_ = conn.Close(websocket.StatusNormalClosure, "")
-	return nil
-}
-
-// Recv joins a slot, runs PAKE + WebRTC, parses the preamble off the head of
-// the encrypted stream, and forwards the remaining plaintext to the sink
-// produced by openSink. openSink is called exactly once, after the preamble is
-// decoded; the returned writer is closed when the transfer completes.
-func Recv(ctx context.Context, logger *slog.Logger, server string, code wire.Code, policy RelayPolicy, openSink SinkOpener) error {
-	wsURL, err := wsURLFor(server)
-	if err != nil {
-		return fmt.Errorf("resolving websocket URL: %w", err)
-	}
-
-	conn, _, err := websocket.Dial(ctx, wsURL, nil)
-	if err != nil {
-		return fmt.Errorf("dialing %s: %w", wsURL, err)
-	}
-	defer conn.CloseNow()
-
-	if err := writeCtl(ctx, conn, wire.ClientHello{Op: wire.OpJoin, Slot: code.Slot}); err != nil {
-		return fmt.Errorf("sending join: %w", err)
-	}
-
-	paired, err := readCtl(ctx, conn)
-	if err != nil {
-		return fmt.Errorf("reading paired: %w", err)
-	}
-	if err := expectOp(paired, wire.OpPaired); err != nil {
-		return fmt.Errorf("handling paired frame: %w", err)
-	}
-	logger.DebugContext(ctx, "paired", slog.Uint64("slot", uint64(code.Slot)))
-
-	key, err := wire.RecvHandshakeMsg(ctx, wsMsgConn{conn: conn}, code)
-	if err != nil {
-		return fmt.Errorf("running pake handshake: %w", err)
-	}
-	logger.DebugContext(ctx, "pake key derived")
-
-	ice := iceServersFromEnvelope(paired)
-	if policy == RelayNone {
-		ice = nil
-	}
-	cfg := rtc.Config{
-		ICEServers:      ice,
-		TransportPolicy: policy.transportPolicy(),
-		Logger:          logger,
-	}
-	sink := &preambleSink{openSink: openSink}
-	if err := rtc.Recv(ctx, wsMsgConn{conn: conn}, key, cfg, sink); err != nil {
-		// Finalize the sink so partial writes are flushed to disk even on
-		// error paths; report the primary transport error, not the close
-		// follow-on.
-		_ = sink.Close()
-		return fmt.Errorf("receiving payload: %w", err)
-	}
-	if err := sink.Close(); err != nil {
-		return fmt.Errorf("closing receive sink: %w", err)
-	}
-	_ = conn.Close(websocket.StatusNormalClosure, "")
-	return nil
-}
 
 // preambleSink is a state-machine io.Writer: the first frame of bytes written
 // to it is interpreted as a length-prefixed [wire.Preamble], after which the

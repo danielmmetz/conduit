@@ -26,12 +26,6 @@ import (
 // Open a session by paired calls to Initiate (one peer) and Respond (the
 // other). After open, the peers' APIs are symmetric — there is no
 // sender/receiver role at the session level. Call Close to tear down.
-//
-// Wire-compatible with v1 rtc.Send / rtc.Recv: the single DC is created
-// the same way and the framing tags are unchanged. A v1 sender → v2
-// receiver pairing works as a one-shot transfer; the v2 receiver's Pull
-// returns when the v1 sender's tagEOF arrives, and the rtc-level close
-// cascades back through the trickleManager's teardown handshake.
 type Session struct {
 	cfg      Config
 	pc       *webrtc.PeerConnection
@@ -99,15 +93,12 @@ func (r Route) String() string {
 	}
 }
 
-// Initiate opens a session as the WebRTC offerer. The peer must call
-// Respond. Wire-compatible with v1 rtc.Send: a v1 sender's Recv-style
-// counterpart can use Respond unchanged.
+// Initiate opens a session as the WebRTC offerer. The peer must call Respond.
 func Initiate(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config) (*Session, error) {
 	return openSession(ctx, sig, key, cfg, true)
 }
 
-// Respond opens a session as the WebRTC answerer. The peer must call
-// Initiate. Wire-compatible with v1 rtc.Recv.
+// Respond opens a session as the WebRTC answerer. The peer must call Initiate.
 func Respond(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config) (*Session, error) {
 	return openSession(ctx, sig, key, cfg, false)
 }
@@ -221,8 +212,7 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 	return s, nil
 }
 
-// exchangeSDP runs the offer/answer dance over sig. The encryption and
-// signaling-message format match the v1 Send/Recv path.
+// exchangeSDP runs the offer/answer dance over sig.
 func exchangeSDP(ctx context.Context, pc *webrtc.PeerConnection, sig wire.MsgConn, key []byte, initiator bool) error {
 	if initiator {
 		offer, err := pc.CreateOffer(nil)
@@ -351,8 +341,8 @@ func (s *Session) runDemux(ctx context.Context) {
 // the final frame). Not safe to call concurrently with itself.
 //
 // lastAck is reset to zero at the start of each Push because the receiver's
-// ackingWriter rebuilds per Pull — every transfer's ack count starts at 0
-// and grows to that transfer's byte total. Each Push waits for the
+// sessionAckingWriter rebuilds per Pull — every transfer's ack count starts
+// at 0 and grows to that transfer's byte total. Each Push waits for the
 // transfer's own n, not a session-cumulative total.
 func (s *Session) Push(ctx context.Context, src io.Reader) error {
 	s.lastAck.Store(0)
@@ -648,14 +638,13 @@ func (a *atomicRWC) close() {
 	}
 }
 
-// lockedTagWriter is tagWriter with a mutex around each frame Write so it
-// shares the data channel safely with sessionAckingWriter, and chunks
-// large inputs so each underlying Write produces one DC message no larger
-// than maxPayloadPerFrame. v1's tagWriter never had to chunk because
-// wire.Encrypt upstream already produced bounded chunks; rtc.Session is
-// plaintext at the transport layer, so a caller passing a multi-MB slice
-// (e.g. via bytes.Reader.WriteTo) would otherwise produce a single
-// oversize SCTP message that blows past the receiver's read buffer.
+// lockedTagWriter writes one tagData frame per Write under a mutex so it
+// shares the data channel safely with sessionAckingWriter, and chunks large
+// inputs so each underlying Write produces one DC message no larger than
+// maxPayloadPerFrame. The Session.Push input is plaintext at the transport
+// layer, so a caller passing a multi-MB slice (e.g. via bytes.Reader.WriteTo)
+// would otherwise produce a single oversize SCTP message that blows past the
+// receiver's read buffer.
 type lockedTagWriter struct {
 	w      io.Writer
 	mu     *sync.Mutex
@@ -727,8 +716,10 @@ func (t *lockedTagWriter) Close() error {
 	return nil
 }
 
-// sessionAckingWriter is ackingWriter with a mutex around each ack frame
-// Write so it shares the data channel safely with lockedTagWriter.
+// sessionAckingWriter wraps the receiver's sink with a counter; every
+// ackThreshold plaintext bytes written it emits a tagAck frame back to raw
+// under the shared writeMu so it interleaves safely with lockedTagWriter.
+// flush() emits a final ack covering all bytes written.
 type sessionAckingWriter struct {
 	dst          io.Writer
 	raw          io.Writer

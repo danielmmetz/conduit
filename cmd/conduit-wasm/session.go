@@ -64,9 +64,7 @@ func (r *sessionRegistry) remove(id string) {
 	r.mu.Unlock()
 }
 
-// registerSession adds session-mode bindings to the existing conduit object.
-// Distinct from register so the additive nature is obvious — v1 send/recv
-// keeps working; the web client opts into sessions explicitly.
+// registerSession adds session-mode bindings to the conduit object.
 func (b *wasmBridge) registerSession(parent context.Context, exports js.Value) {
 	exports.Set("openSender", js.FuncOf(func(_ js.Value, args []js.Value) any {
 		return b.openSenderJS(parent, args)
@@ -238,22 +236,28 @@ func (b *wasmBridge) sessionPushFileJS(args []js.Value) any {
 	if filename == "" {
 		filename = "payload.bin"
 	}
-
-	h := b.sessions.get(id)
-	if h == nil {
-		safeInvoke(onDone, "session not found")
-		return js.Undefined()
-	}
-	if h.sess == nil {
-		safeInvoke(onDone, "session not yet open")
-		return js.Undefined()
-	}
-
-	preamble := wire.Preamble{
+	b.pushBytes(id, payload, wire.Preamble{
 		Kind: wire.PreambleKindFile,
 		Name: filename,
 		Size: int64(len(payload)),
 		MIME: mimeType,
+	}, onProgress, onDone)
+	return js.Undefined()
+}
+
+// pushBytes is the shared backend for sessionPush{File,Tar,Text}JS: look up
+// the session, open an in-memory source with auto compression, and push it
+// in a tracked goroutine. payload is owned by the source for the lifetime of
+// the goroutine. onDone is invoked with null on success or an error string.
+func (b *wasmBridge) pushBytes(id string, payload []byte, preamble wire.Preamble, onProgress, onDone js.Value) {
+	h := b.sessions.get(id)
+	if h == nil {
+		safeInvoke(onDone, "session not found")
+		return
+	}
+	if h.sess == nil {
+		safeInvoke(onDone, "session not yet open")
+		return
 	}
 	src, err := xfer.OpenBytes(payload, preamble, xfer.SourceOptions{
 		Compression: xfer.CompressAuto,
@@ -261,7 +265,7 @@ func (b *wasmBridge) sessionPushFileJS(args []js.Value) any {
 	})
 	if err != nil {
 		safeInvoke(onDone, err.Error())
-		return js.Undefined()
+		return
 	}
 	b.startOp(func() {
 		defer src.Close()
@@ -271,7 +275,6 @@ func (b *wasmBridge) sessionPushFileJS(args []js.Value) any {
 		}
 		safeInvoke(onDone, js.Null())
 	})
-	return js.Undefined()
 }
 
 // makeJSProgress wraps a JS callback as an xfer.SourceOptions.Progress
@@ -302,16 +305,6 @@ func (b *wasmBridge) sessionPushTarJS(args []js.Value) any {
 	displayName := args[2].String()
 	onProgress := args[3]
 	onDone := args[4]
-
-	h := b.sessions.get(id)
-	if h == nil {
-		safeInvoke(onDone, "session not found")
-		return js.Undefined()
-	}
-	if h.sess == nil {
-		safeInvoke(onDone, "session not yet open")
-		return js.Undefined()
-	}
 	if displayName == "" {
 		displayName = "files.tar"
 	}
@@ -374,28 +367,12 @@ func (b *wasmBridge) sessionPushTarJS(args []js.Value) any {
 		return js.Undefined()
 	}
 
-	preamble := wire.Preamble{
+	b.pushBytes(id, buf.Bytes(), wire.Preamble{
 		Kind: wire.PreambleKindTar,
 		Name: displayName,
 		Size: int64(buf.Len()),
 		MIME: "application/x-tar",
-	}
-	src, err := xfer.OpenBytes(buf.Bytes(), preamble, xfer.SourceOptions{
-		Compression: xfer.CompressAuto,
-		Progress:    makeJSProgress(onProgress, int64(buf.Len())),
-	})
-	if err != nil {
-		safeInvoke(onDone, err.Error())
-		return js.Undefined()
-	}
-	b.startOp(func() {
-		defer src.Close()
-		if err := h.sess.Push(h.ctx, src.Preamble, src.Reader); err != nil {
-			safeInvoke(onDone, err.Error())
-			return
-		}
-		safeInvoke(onDone, js.Null())
-	})
+	}, onProgress, onDone)
 	return js.Undefined()
 }
 
@@ -422,38 +399,12 @@ func (b *wasmBridge) sessionPushTextJS(args []js.Value) any {
 	text := args[1].String()
 	onProgress := args[2]
 	onDone := args[3]
-
-	h := b.sessions.get(id)
-	if h == nil {
-		safeInvoke(onDone, "session not found")
-		return js.Undefined()
-	}
-	if h.sess == nil {
-		safeInvoke(onDone, "session not yet open")
-		return js.Undefined()
-	}
 	payload := []byte(text)
-	preamble := wire.Preamble{
+	b.pushBytes(id, payload, wire.Preamble{
 		Kind: wire.PreambleKindText,
 		Size: int64(len(payload)),
 		MIME: "text/plain; charset=utf-8",
-	}
-	src, err := xfer.OpenBytes(payload, preamble, xfer.SourceOptions{
-		Compression: xfer.CompressAuto,
-		Progress:    makeJSProgress(onProgress, int64(len(payload))),
-	})
-	if err != nil {
-		safeInvoke(onDone, err.Error())
-		return js.Undefined()
-	}
-	b.startOp(func() {
-		defer src.Close()
-		if err := h.sess.Push(h.ctx, src.Preamble, src.Reader); err != nil {
-			safeInvoke(onDone, err.Error())
-			return
-		}
-		safeInvoke(onDone, js.Null())
-	})
+	}, onProgress, onDone)
 	return js.Undefined()
 }
 

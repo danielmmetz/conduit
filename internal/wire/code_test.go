@@ -6,29 +6,32 @@ import (
 	"testing"
 )
 
-func TestFormatAndParseCode(t *testing.T) {
+func TestGenerateAndParseCode(t *testing.T) {
 	t.Parallel()
-	code, err := FormatCode(42)
+	code, err := GenerateCode(42)
 	if err != nil {
-		t.Fatalf("FormatCode: %v", err)
+		t.Fatalf("GenerateCode: %v", err)
 	}
-	parts := strings.Split(code, "-")
+	if code.Slot != 42 {
+		t.Errorf("code.Slot = %d, want 42", code.Slot)
+	}
+	if len(code.Words) != DefaultCodeWords {
+		t.Errorf("code.Words = %v, want %d words", code.Words, DefaultCodeWords)
+	}
+	rendered := code.String()
+	parts := strings.Split(rendered, "-")
 	if len(parts) != 1+DefaultCodeWords {
-		t.Fatalf("FormatCode = %q, want slot + %d words", code, DefaultCodeWords)
+		t.Fatalf("code.String = %q, want slot + %d words", rendered, DefaultCodeWords)
 	}
-
-	parsed, err := ParseCode(code)
+	parsed, err := ParseCode(rendered)
 	if err != nil {
 		t.Fatalf("ParseCode: %v", err)
 	}
-	if parsed.Slot != 42 {
-		t.Errorf("parsed.Slot = %d, want 42", parsed.Slot)
+	if parsed.Slot != code.Slot {
+		t.Errorf("parsed.Slot = %d, want %d", parsed.Slot, code.Slot)
 	}
-	if len(parsed.Words) != DefaultCodeWords {
-		t.Errorf("parsed.Words = %v, want %d words", parsed.Words, DefaultCodeWords)
-	}
-	if got := parsed.String(); got != code {
-		t.Errorf("roundtrip: got %q, want %q", got, code)
+	if !slices.Equal(parsed.Words, code.Words) {
+		t.Errorf("parsed.Words = %v, want %v", parsed.Words, code.Words)
 	}
 }
 

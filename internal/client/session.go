@@ -16,14 +16,14 @@ import (
 
 // A Session is a persistent, bidirectional conduit between two peers. Built
 // on top of rtc.Session, it adds slot reservation / PAKE on open, age
-// encryption per transfer, and the wire.Preamble framing the v1 path uses.
+// encryption per transfer, and wire.Preamble framing.
 //
 // Either peer may Push at any time; inbound transfers are delivered to the
 // SinkOpener supplied at open time, fired once per transfer. Push and the
 // inbound pump run on independent rtc-level data channels, so an outbound
 // transfer does not block an inbound one.
 //
-// Both peers must call Close. The signaling channel is used for the v1
+// Both peers must call Close. The signaling channel is used for the rtc
 // teardown handshake exactly once, at session close.
 type Session struct {
 	rtc        *rtc.Session
@@ -31,9 +31,9 @@ type Session struct {
 	key        []byte
 	logger     *slog.Logger
 	onTransfer SinkOpener
-	// keepConn skips closing s.conn on Session.Close. Used by
-	// PersistentSender, which owns the WebSocket across many Sessions and
-	// closes it only when the sender exits.
+	// keepConn skips closing s.conn on Session.Close. Set by Host.Accept,
+	// which owns the WebSocket across many Sessions and closes it only when
+	// the Host itself is Closed.
 	keepConn bool
 
 	pumpDone chan struct{}
@@ -90,16 +90,12 @@ func OpenSender(ctx context.Context, logger *slog.Logger, server string, policy 
 	}
 	logger.DebugContext(ctx, "slot reserved", slog.Uint64("slot", uint64(reserved.Slot)))
 
-	code, err := wire.FormatCode(reserved.Slot)
+	code, err := wire.GenerateCode(reserved.Slot)
 	if err != nil {
-		return nil, fmt.Errorf("opening sender: formatting code: %w", err)
+		return nil, fmt.Errorf("opening sender: generating code: %w", err)
 	}
 	if onCode != nil {
-		onCode(code)
-	}
-	parsed, err := wire.ParseCode(code)
-	if err != nil {
-		return nil, fmt.Errorf("opening sender: parsing code: %w", err)
+		onCode(code.String())
 	}
 
 	paired, err := readCtl(ctx, conn)
@@ -110,7 +106,7 @@ func OpenSender(ctx context.Context, logger *slog.Logger, server string, policy 
 		return nil, fmt.Errorf("opening sender: %w", err)
 	}
 
-	key, err := wire.SendHandshakeMsg(ctx, wsMsgConn{conn: conn}, parsed)
+	key, err := wire.SendHandshakeMsg(ctx, wsMsgConn{conn: conn}, code)
 	if err != nil {
 		return nil, fmt.Errorf("opening sender: pake: %w", err)
 	}
@@ -207,8 +203,7 @@ type Host struct {
 	conn   *websocket.Conn
 	server string
 	policy RelayPolicy
-	code   string
-	parsed wire.Code
+	code   wire.Code
 	logger *slog.Logger
 
 	closeOnce sync.Once
@@ -217,7 +212,7 @@ type Host struct {
 
 // Code returns the stable rendezvous code for this slot. Safe to share
 // with successive peers; the slot ID is reused across pairings.
-func (h *Host) Code() string { return h.code }
+func (h *Host) Code() string { return h.code.String() }
 
 // OpenHost reserves a persistent slot and returns a handle the caller
 // can use to accept successive peers. onCode is invoked exactly once
@@ -253,23 +248,18 @@ func OpenHost(ctx context.Context, logger *slog.Logger, server string, policy Re
 	}
 	logger.DebugContext(ctx, "persistent slot reserved", slog.Uint64("slot", uint64(reserved.Slot)))
 
-	code, err := wire.FormatCode(reserved.Slot)
+	code, err := wire.GenerateCode(reserved.Slot)
 	if err != nil {
-		return nil, fmt.Errorf("opening host: formatting code: %w", err)
-	}
-	parsed, err := wire.ParseCode(code)
-	if err != nil {
-		return nil, fmt.Errorf("opening host: parsing code: %w", err)
+		return nil, fmt.Errorf("opening host: generating code: %w", err)
 	}
 	if onCode != nil {
-		onCode(code)
+		onCode(code.String())
 	}
 	return &Host{
 		conn:   conn,
 		server: server,
 		policy: policy,
 		code:   code,
-		parsed: parsed,
 		logger: logger,
 	}, nil
 }
@@ -294,7 +284,7 @@ func (h *Host) Accept(ctx context.Context, onTransfer SinkOpener) (*Session, err
 		return nil, fmt.Errorf("host accept: %w", err)
 	}
 
-	key, err := wire.SendHandshakeMsg(ctx, wsMsgConn{conn: h.conn}, h.parsed)
+	key, err := wire.SendHandshakeMsg(ctx, wsMsgConn{conn: h.conn}, h.code)
 	if err != nil {
 		return nil, fmt.Errorf("host accept: pake: %w", err)
 	}

@@ -233,7 +233,7 @@ func newTarSource(paths []string, git bool) (*Source, error) {
 			err = cerr
 		}
 		if err != nil {
-			// CloseWithError propagates to the next pr.Read so rtc.Send
+			// CloseWithError propagates to the next pr.Read so the consumer
 			// surfaces a useful failure rather than a silent truncated stream.
 			_ = pw.CloseWithError(fmt.Errorf("streaming tar: %w", err))
 		}

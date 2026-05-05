@@ -11,14 +11,15 @@ import (
 // DefaultCodeWords is the number of words appended to the slot id in the code.
 const DefaultCodeWords = 3
 
-// FormatCode composes the user-visible code "<slot>-word-word-word".
-// It reads DefaultCodeWords * 2 bytes of entropy from crypto/rand.
-func FormatCode(slot uint32) (string, error) {
+// GenerateCode composes a user-visible Code with random words for slot.
+// It reads DefaultCodeWords * 2 bytes of entropy from crypto/rand. Use
+// (Code).String() for the "<slot>-word-word-word" form.
+func GenerateCode(slot uint32) (Code, error) {
 	words, err := randomWords(DefaultCodeWords)
 	if err != nil {
-		return "", fmt.Errorf("generating words: %w", err)
+		return Code{}, fmt.Errorf("generating words: %w", err)
 	}
-	return fmt.Sprintf("%d-%s", slot, strings.Join(words, "-")), nil
+	return Code{Slot: slot, Words: words}, nil
 }
 
 // Code is a parsed short code: the numeric slot id and the word portion.

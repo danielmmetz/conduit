@@ -15,7 +15,7 @@ import (
 // queue is full"); spec-wise no portable upper bound exists. The CLI's
 // native pion stack applies SCTP-level backpressure inside Write, but the
 // JS wrapper just forwards each Send call to the browser, so the payload
-// pump in rtc.Send must stop when the queue is too full.
+// pump in rtc.Session.Push must stop when the queue is too full.
 //
 // The high/low watermarks below keep enough bytes in flight to saturate a
 // fast link without ever approaching any browser's hard ceiling. They are
