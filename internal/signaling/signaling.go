@@ -300,12 +300,28 @@ func (s *Server) runSenderPump(ctx context.Context, sl *slot, cancelSlot context
 			return
 		}
 		s.mu.Lock()
-		recv := sl.pair.receiverConn
+		pair := sl.pair
 		s.mu.Unlock()
-		if recv == nil {
+		if pair.receiverConn == nil {
 			continue
 		}
-		if err := recv.Write(ctx, typ, data); err != nil {
+		// Hold the frame until runPairing has sent the paired control
+		// envelope to BOTH peers. Otherwise a fast sender's first PAKE
+		// message can race past pairedCtl(receiver)'s TURN-credential
+		// mint and arrive at the receiver before its paired envelope —
+		// readCtl then tries to JSON-decode the binary PAKE bytes and
+		// fails ("invalid character 'A' looking for beginning of
+		// value", since age PAKE messages start with the age intro
+		// stanza). pair.relayStart is closed at the end of runPairing's
+		// paired-write block, which is exactly the gate we want.
+		select {
+		case <-pair.relayStart:
+		case <-pair.done:
+			continue
+		case <-ctx.Done():
+			return
+		}
+		if err := pair.receiverConn.Write(ctx, typ, data); err != nil {
 			// The current receiver is gone or stalled; drop the frame.
 			// handleJoin's read-side will close the pair imminently.
 			continue
