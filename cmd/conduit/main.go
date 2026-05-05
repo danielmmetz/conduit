@@ -37,8 +37,13 @@ const defaultServerURL = "https://conduit.danielmmetz.com"
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	if err := mainE(ctx, logger, os.Stdin, os.Stdout, os.Stderr, os.Args[1:]); err != nil {
+	// LevelVar lets the --verbose subcommand flag bump the log level
+	// from Warn to Debug after flag parsing without recreating the
+	// logger or threading state through every constructor.
+	var level slog.LevelVar
+	level.Set(slog.LevelWarn)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: &level}))
+	if err := mainE(ctx, logger, &level, os.Stdin, os.Stdout, os.Stderr, os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			if ctx.Err() == nil {
 				os.Exit(2)
@@ -56,24 +61,24 @@ func main() {
 	}
 }
 
-func mainE(ctx context.Context, logger *slog.Logger, stdin io.Reader, out, stderr io.Writer, args []string) error {
+func mainE(ctx context.Context, logger *slog.Logger, level *slog.LevelVar, stdin io.Reader, out, stderr io.Writer, args []string) error {
 	root := ffcli.Command{
 		Name:       "conduit",
 		ShortUsage: "conduit <send|recv> [flags] ...",
 		ShortHelp:  "Share text or files between two devices over a rendezvous server.",
 		Subcommands: []*ffcli.Command{
-			sendCmd(logger, stdin, out, stderr),
-			recvCmd(logger, out, stderr),
+			sendCmd(logger, level, stdin, out, stderr),
+			recvCmd(logger, level, out, stderr),
 		},
 		Exec: func(context.Context, []string) error { return flag.ErrHelp },
 	}
 	return root.ParseAndRun(ctx, args)
 }
 
-func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli.Command {
+func sendCmd(logger *slog.Logger, level *slog.LevelVar, stdin io.Reader, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit send", flag.ContinueOnError)
 	var server, text, compressFlag string
-	var showQR, git bool
+	var showQR, git, verbose bool
 	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&text, "text", "", "text payload to send instead of a file")
@@ -81,6 +86,7 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 	fs.BoolVar(&git, "git", true, "for directory sends, honor a root .gitignore and skip .git/; --git=false sends the tree verbatim")
 	fs.StringVar(&compressFlag, "compress", "auto", "payload compression: auto (zstd unless the MIME is already compressed), zstd (force on), none (force off)")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
+	fs.BoolVar(&verbose, "verbose", false, "log per-frame debug events (data channel tx/rx, ack progress) to stderr")
 	return &ffcli.Command{
 		Name:       "send",
 		ShortUsage: "conduit send [--text <message> | <path>... | -] [--server URL]",
@@ -88,6 +94,9 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
+			if verbose && level != nil {
+				level.Set(slog.LevelDebug)
+			}
 			mode, err := parseCompressMode(compressFlag)
 			if err != nil {
 				return fmt.Errorf("running send: %w", err)
@@ -182,16 +191,17 @@ func parseCompressMode(s string) (xfer.CompressMode, error) {
 	}
 }
 
-func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
+func recvCmd(logger *slog.Logger, level *slog.LevelVar, out, stderr io.Writer) *ffcli.Command {
 	fs := flag.NewFlagSet("conduit recv", flag.ContinueOnError)
 	var server, outPath string
-	var watch, showQR bool
+	var watch, showQR, verbose bool
 	var policy client.RelayPolicy
 	fs.StringVar(&server, "server", defaultServerURL, "signaling server base URL")
 	fs.StringVar(&outPath, "o", "", "write the received payload to this path ('-' for stdout; default is the sender's filename for files or the working directory for directories)")
 	fs.BoolVar(&watch, "watch", false, "stay open across multiple transfers; without a code the receiver hosts a stable persistent slot, with a code it joins and stays paired through the peer's session (-o must be empty or a directory in either mode)")
 	fs.BoolVar(&showQR, "qr", false, "in --watch host mode, render a QR of the browser URL for scanning from a phone after printing the code")
 	fs.Var(&policy, "relay", "ICE relay policy: auto (default), never (refuse TURN; fail rather than fall back), or always (TURN-only, useful for exercising the relay)")
+	fs.BoolVar(&verbose, "verbose", false, "log per-frame debug events (data channel tx/rx, ack progress) to stderr")
 	return &ffcli.Command{
 		Name:       "recv",
 		ShortUsage: "conduit recv <code> [-o PATH | -] [--server URL]\n       conduit recv --watch [<code>] [-o DIR] [--server URL]",
@@ -199,6 +209,9 @@ func recvCmd(logger *slog.Logger, out, stderr io.Writer) *ffcli.Command {
 		FlagSet:    fs,
 		Options:    []ff.Option{ff.WithEnvVarPrefix("CONDUIT")},
 		Exec: func(ctx context.Context, args []string) error {
+			if verbose && level != nil {
+				level.Set(slog.LevelDebug)
+			}
 			if watch {
 				return runRecvWatch(ctx, logger, server, policy, outPath, showQR, args, out, stderr)
 			}

@@ -51,7 +51,7 @@ func TestSendRecvRoundTrip(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		defer close(codeCh)
-		if err := mainE(gctx, logger, nil, sendOut, io.Discard, []string{"send", "--server", ts.URL, "--text", "hello conduit"}); err != nil {
+		if err := mainE(gctx, logger, nil, nil, sendOut, io.Discard, []string{"send", "--server", ts.URL, "--text", "hello conduit"}); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
 		return nil
@@ -67,7 +67,7 @@ func TestSendRecvRoundTrip(t *testing.T) {
 		case <-gctx.Done():
 			return fmt.Errorf("recv: %w", gctx.Err())
 		}
-		if err := mainE(gctx, logger, nil, &recvBuf, io.Discard, []string{"recv", "--server", ts.URL, code}); err != nil {
+		if err := mainE(gctx, logger, nil, nil, &recvBuf, io.Discard, []string{"recv", "--server", ts.URL, code}); err != nil {
 			return fmt.Errorf("recv: %w", err)
 		}
 		return nil
@@ -111,7 +111,7 @@ func TestSendRecvFileRoundTrip(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		defer close(codeCh)
-		if err := mainE(gctx, logger, nil, sendOut, io.Discard, []string{"send", "--server", ts.URL, sendPath}); err != nil {
+		if err := mainE(gctx, logger, nil, nil, sendOut, io.Discard, []string{"send", "--server", ts.URL, sendPath}); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
 		return nil
@@ -127,7 +127,7 @@ func TestSendRecvFileRoundTrip(t *testing.T) {
 		case <-gctx.Done():
 			return fmt.Errorf("recv: %w", gctx.Err())
 		}
-		if err := mainE(gctx, logger, nil, io.Discard, io.Discard, []string{"recv", "--server", ts.URL, "-o", recvPath, code}); err != nil {
+		if err := mainE(gctx, logger, nil, nil, io.Discard, io.Discard, []string{"recv", "--server", ts.URL, "-o", recvPath, code}); err != nil {
 			return fmt.Errorf("recv: %w", err)
 		}
 		return nil
@@ -174,7 +174,7 @@ func TestRecvWatchMultipleSenders(t *testing.T) {
 
 	recvDone := make(chan error, 1)
 	go func() {
-		recvDone <- mainE(ctx, logger, nil, recvOut, io.Discard,
+		recvDone <- mainE(ctx, logger, nil, nil, recvOut, io.Discard,
 			[]string{"recv", "--server", ts.URL, "--watch", "-o", dir})
 		close(codeCh)
 	}()
@@ -310,7 +310,7 @@ func TestRecvWatchJoinerMultiplePushes(t *testing.T) {
 	// CLI: join via --watch and stay paired until the sender closes.
 	recvDone := make(chan error, 1)
 	go func() {
-		recvDone <- mainE(ctx, logger, nil, io.Discard, io.Discard,
+		recvDone <- mainE(ctx, logger, nil, nil, io.Discard, io.Discard,
 			[]string{"recv", "--server", ts.URL, "--watch", "-o", dir, code})
 	}()
 
@@ -347,7 +347,7 @@ func TestRecvWatchJoinerMultiplePushes(t *testing.T) {
 func TestRecvWatchRejectsTooManyArgs(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	err := mainE(t.Context(), logger, nil, io.Discard, io.Discard,
+	err := mainE(t.Context(), logger, nil, nil, io.Discard, io.Discard,
 		[]string{"recv", "--watch", "42-foo-bar-baz", "extra"})
 	if err == nil {
 		t.Fatal("recv --watch <code> extra returned nil, want error")
@@ -428,7 +428,7 @@ func TestSendRecvDirectoryRoundTrip(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		defer close(codeCh)
-		if err := mainE(gctx, logger, nil, sendOut, io.Discard, []string{"send", "--server", ts.URL, srcRoot}); err != nil {
+		if err := mainE(gctx, logger, nil, nil, sendOut, io.Discard, []string{"send", "--server", ts.URL, srcRoot}); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
 		return nil
@@ -444,7 +444,7 @@ func TestSendRecvDirectoryRoundTrip(t *testing.T) {
 		case <-gctx.Done():
 			return fmt.Errorf("recv: %w", gctx.Err())
 		}
-		if err := mainE(gctx, logger, nil, io.Discard, io.Discard, []string{"recv", "--server", ts.URL, "-o", dstRoot, code}); err != nil {
+		if err := mainE(gctx, logger, nil, nil, io.Discard, io.Discard, []string{"recv", "--server", ts.URL, "-o", dstRoot, code}); err != nil {
 			return fmt.Errorf("recv: %w", err)
 		}
 		return nil
@@ -502,7 +502,7 @@ func TestSendRecvStdinStdoutRoundTrip(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		defer close(codeCh)
-		if err := mainE(gctx, logger, stdin, sendOut, io.Discard, []string{"send", "--server", ts.URL, "-"}); err != nil {
+		if err := mainE(gctx, logger, nil, stdin, sendOut, io.Discard, []string{"send", "--server", ts.URL, "-"}); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
 		return nil
@@ -519,7 +519,7 @@ func TestSendRecvStdinStdoutRoundTrip(t *testing.T) {
 			return fmt.Errorf("recv: %w", gctx.Err())
 		}
 		// "-" positional means write payload to the out stream (stdout here).
-		if err := mainE(gctx, logger, nil, &recvBuf, io.Discard, []string{"recv", "--server", ts.URL, code, "-"}); err != nil {
+		if err := mainE(gctx, logger, nil, nil, &recvBuf, io.Discard, []string{"recv", "--server", ts.URL, code, "-"}); err != nil {
 			return fmt.Errorf("recv: %w", err)
 		}
 		return nil
@@ -567,7 +567,7 @@ func TestSendRecvMultiFileRoundTrip(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		defer close(codeCh)
-		if err := mainE(gctx, logger, nil, sendOut, io.Discard, []string{"send", "--server", ts.URL, p1, p2}); err != nil {
+		if err := mainE(gctx, logger, nil, nil, sendOut, io.Discard, []string{"send", "--server", ts.URL, p1, p2}); err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
 		return nil
@@ -583,7 +583,7 @@ func TestSendRecvMultiFileRoundTrip(t *testing.T) {
 		case <-gctx.Done():
 			return fmt.Errorf("recv: %w", gctx.Err())
 		}
-		if err := mainE(gctx, logger, nil, io.Discard, io.Discard, []string{"recv", "--server", ts.URL, "-o", dst, code}); err != nil {
+		if err := mainE(gctx, logger, nil, nil, io.Discard, io.Discard, []string{"recv", "--server", ts.URL, "-o", dst, code}); err != nil {
 			return fmt.Errorf("recv: %w", err)
 		}
 		return nil

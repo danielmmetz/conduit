@@ -284,6 +284,18 @@ func (s *Session) runDemux(ctx context.Context) {
 	defer close(s.inFrames)
 	_ = ctx
 
+	var (
+		framesRead int
+		bytesRead  int64
+	)
+	defer func() {
+		s.cfg.Logger.Debug("demux exit",
+			slog.Int("framesRead", framesRead),
+			slog.Int64("bytesRead", bytesRead),
+			slog.Any("err", s.demuxErr),
+		)
+	}()
+
 	msg := make([]byte, maxFrameSize)
 	for {
 		n, err := s.raw.Read(msg)
@@ -295,15 +307,26 @@ func (s *Session) runDemux(ctx context.Context) {
 			s.demuxErr = fmt.Errorf("demux: empty frame")
 			return
 		}
+		framesRead++
+		bytesRead += int64(n)
 		switch msg[0] {
 		case tagData:
 			if n == 1 {
 				s.demuxErr = fmt.Errorf("demux: empty data frame")
 				return
 			}
+			s.cfg.Logger.Debug("dc rx tagData",
+				slog.Int("payload", n-1),
+				slog.Int("frame", framesRead),
+				slog.Int64("totalBytes", bytesRead),
+			)
 			payload := append([]byte(nil), msg[1:n]...)
 			s.inFrames <- dataFrame{payload: payload}
 		case tagEOF:
+			s.cfg.Logger.Debug("dc rx tagEOF",
+				slog.Int("frame", framesRead),
+				slog.Int64("totalBytes", bytesRead),
+			)
 			s.inFrames <- dataFrame{eof: true}
 		case tagAck:
 			if n != ackFrameSize {
@@ -311,12 +334,19 @@ func (s *Session) runDemux(ctx context.Context) {
 				return
 			}
 			total := int64(binary.BigEndian.Uint64(msg[1:n]))
+			s.cfg.Logger.Debug("dc rx tagAck",
+				slog.Int64("total", total),
+				slog.Int("frame", framesRead),
+			)
 			s.recordAck(total)
 			if s.cfg.OnRemoteProgress != nil {
 				s.cfg.OnRemoteProgress(total)
 			}
 		default:
-			// Unknown tag: ignore for forward compatibility, matches readAcks.
+			s.cfg.Logger.Debug("dc rx unknown tag",
+				slog.Int("tag", int(msg[0])),
+				slog.Int("size", n),
+			)
 		}
 	}
 }
@@ -335,7 +365,8 @@ func (s *Session) runDemux(ctx context.Context) {
 // transfer's own n, not a session-cumulative total.
 func (s *Session) Push(ctx context.Context, src io.Reader) error {
 	s.lastAck.Store(0)
-	tw := &lockedTagWriter{w: s.w, mu: &s.writeMu}
+	s.cfg.Logger.Debug("push start")
+	tw := &lockedTagWriter{w: s.w, mu: &s.writeMu, logger: s.cfg.Logger}
 	n, err := io.Copy(tw, src)
 	if err != nil {
 		return fmt.Errorf("push: copying payload: %w", err)
@@ -343,9 +374,14 @@ func (s *Session) Push(ctx context.Context, src io.Reader) error {
 	if err := tw.Close(); err != nil {
 		return fmt.Errorf("push: writing eof: %w", err)
 	}
+	s.cfg.Logger.Debug("push waiting for ack",
+		slog.Int64("target", n),
+		slog.Int("framesSent", tw.frames),
+	)
 	if err := s.waitAck(ctx, n); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
+	s.cfg.Logger.Debug("push complete", slog.Int64("acked", n))
 	return nil
 }
 
@@ -353,11 +389,15 @@ func (s *Session) Push(ctx context.Context, src io.Reader) error {
 // in waitAck. The closed-and-replaced channel pattern lets multiple
 // waiters notice the wakeup without losing edges between writes.
 func (s *Session) recordAck(total int64) {
-	s.lastAck.Store(total)
+	prev := s.lastAck.Swap(total)
 	s.ackBroadcastMu.Lock()
 	close(s.ackBroadcastCh)
 	s.ackBroadcastCh = make(chan struct{})
 	s.ackBroadcastMu.Unlock()
+	s.cfg.Logger.Debug("ack received",
+		slog.Int64("total", total),
+		slog.Int64("prev", prev),
+	)
 }
 
 // ackChannel returns the current broadcast channel under the lock that
@@ -450,13 +490,19 @@ func (s *Session) Pull(ctx context.Context, dst io.Writer) error {
 		dst:          dst,
 		raw:          s.w,
 		mu:           &s.writeMu,
+		logger:       s.cfg.Logger,
 		ackThreshold: defaultAckThreshold,
 	}
+	s.cfg.Logger.Debug("pull start")
 	keepalive := time.NewTicker(pullKeepaliveInterval)
 	defer keepalive.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			s.cfg.Logger.Debug("pull return ctx",
+				slog.Int64("totalConsumed", aw.written),
+				slog.Int("acksEmitted", aw.acks),
+			)
 			return fmt.Errorf("pull: %w", ctx.Err())
 		case <-keepalive.C:
 			// Re-emit the running cumulative ack so the sender's
@@ -464,20 +510,33 @@ func (s *Session) Pull(ctx context.Context, dst io.Writer) error {
 			// got stuck below the application layer. Idempotent —
 			// repeated acks at the same total are harmless on the
 			// peer.
-			if err := aw.flush(); err != nil {
+			if err := aw.flush("keepalive"); err != nil {
 				return fmt.Errorf("pull: flushing keepalive ack: %w", err)
 			}
 		case frame, ok := <-s.inFrames:
 			if !ok {
 				if s.demuxErr != nil {
+					s.cfg.Logger.Debug("pull return demux exit",
+						slog.String("err", s.demuxErr.Error()),
+						slog.Int64("totalConsumed", aw.written),
+						slog.Int("acksEmitted", aw.acks),
+					)
 					return fmt.Errorf("pull: demuxer exited: %w", s.demuxErr)
 				}
+				s.cfg.Logger.Debug("pull return inFrames closed",
+					slog.Int64("totalConsumed", aw.written),
+					slog.Int("acksEmitted", aw.acks),
+				)
 				return io.EOF
 			}
 			if frame.eof {
-				if err := aw.flush(); err != nil {
+				if err := aw.flush("tagEOF"); err != nil {
 					return fmt.Errorf("pull: flushing final ack: %w", err)
 				}
+				s.cfg.Logger.Debug("pull return tagEOF",
+					slog.Int64("totalConsumed", aw.written),
+					slog.Int("acksEmitted", aw.acks),
+				)
 				return nil
 			}
 			if _, err := aw.Write(frame.payload); err != nil {
@@ -609,7 +668,10 @@ func (a *atomicRWC) close() {
 type lockedTagWriter struct {
 	w      io.Writer
 	mu     *sync.Mutex
+	logger *slog.Logger
 	closed bool
+	frames int
+	bytes  int64
 }
 
 const maxPayloadPerFrame = 64 * 1024
@@ -633,6 +695,13 @@ func (t *lockedTagWriter) Write(p []byte) (int, error) {
 		if err != nil {
 			return written, fmt.Errorf("writing data frame: %w", err)
 		}
+		t.frames++
+		t.bytes += int64(len(chunk))
+		t.logger.Debug("dc tx tagData",
+			slog.Int("payload", len(chunk)),
+			slog.Int("frame", t.frames),
+			slog.Int64("totalBytes", t.bytes),
+		)
 		written += len(chunk)
 		p = p[len(chunk):]
 	}
@@ -649,6 +718,10 @@ func (t *lockedTagWriter) Close() error {
 	if _, err := t.w.Write([]byte{tagEOF}); err != nil {
 		return fmt.Errorf("writing eof frame: %w", err)
 	}
+	t.logger.Debug("dc tx tagEOF",
+		slog.Int("framesSent", t.frames),
+		slog.Int64("totalBytes", t.bytes),
+	)
 	return nil
 }
 
@@ -658,9 +731,11 @@ type sessionAckingWriter struct {
 	dst          io.Writer
 	raw          io.Writer
 	mu           *sync.Mutex
+	logger       *slog.Logger
 	written      int64
 	sinceLastAck int64
 	ackThreshold int64
+	acks         int
 }
 
 func (a *sessionAckingWriter) Write(p []byte) (int, error) {
@@ -668,8 +743,12 @@ func (a *sessionAckingWriter) Write(p []byte) (int, error) {
 	if n > 0 {
 		a.written += int64(n)
 		a.sinceLastAck += int64(n)
+		a.logger.Debug("pull consumed payload",
+			slog.Int("bytes", n),
+			slog.Int64("totalConsumed", a.written),
+		)
 		if a.sinceLastAck >= a.ackThreshold {
-			if aerr := a.writeAckLocked(a.written); aerr != nil {
+			if aerr := a.writeAckLocked(a.written, "threshold"); aerr != nil {
 				return n, fmt.Errorf("emitting ack: %w", aerr)
 			}
 			a.sinceLastAck = 0
@@ -678,18 +757,18 @@ func (a *sessionAckingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (a *sessionAckingWriter) flush() error {
+func (a *sessionAckingWriter) flush(reason string) error {
 	if a.written == 0 {
 		return nil
 	}
-	if err := a.writeAckLocked(a.written); err != nil {
+	if err := a.writeAckLocked(a.written, reason); err != nil {
 		return fmt.Errorf("flushing final ack: %w", err)
 	}
 	a.sinceLastAck = 0
 	return nil
 }
 
-func (a *sessionAckingWriter) writeAckLocked(total int64) error {
+func (a *sessionAckingWriter) writeAckLocked(total int64, reason string) error {
 	var buf [ackFrameSize]byte
 	buf[0] = tagAck
 	binary.BigEndian.PutUint64(buf[1:], uint64(total))
@@ -698,5 +777,11 @@ func (a *sessionAckingWriter) writeAckLocked(total int64) error {
 	if _, err := a.raw.Write(buf[:]); err != nil {
 		return fmt.Errorf("writing ack frame: %w", err)
 	}
+	a.acks++
+	a.logger.Debug("dc tx tagAck",
+		slog.String("reason", reason),
+		slog.Int64("total", total),
+		slog.Int("ackNum", a.acks),
+	)
 	return nil
 }
