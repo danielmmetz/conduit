@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielmmetz/conduit/internal/wire"
@@ -57,6 +58,13 @@ type Session struct {
 	demuxErr    error
 	demuxCancel context.CancelFunc
 	demuxWG     sync.WaitGroup
+
+	// lastAck records the cumulative byte count from the most recent tagAck
+	// the demuxer observed. ackBroadcastCh is closed-and-replaced on every
+	// ack, giving Push.waitAck a wakeup signal that composes with select.
+	lastAck         atomic.Int64
+	ackBroadcastMu  sync.Mutex
+	ackBroadcastCh  chan struct{}
 
 	closeOnce sync.Once
 	closeErr  error
@@ -194,17 +202,18 @@ func openSession(ctx context.Context, sig wire.MsgConn, key []byte, cfg Config, 
 
 	demuxCtx, demuxCancel := context.WithCancel(context.Background())
 	s := &Session{
-		cfg:         cfg,
-		pc:          pc,
-		dc:          dc,
-		raw:         raw,
-		closeRaw:    rawHolder.close,
-		w:           wrapSendWriter(dc, raw),
-		tm:          tm,
-		route:       detectRoute(pc),
-		inFrames:    make(chan dataFrame),
-		demuxDone:   make(chan struct{}),
-		demuxCancel: demuxCancel,
+		cfg:            cfg,
+		pc:             pc,
+		dc:             dc,
+		raw:            raw,
+		closeRaw:       rawHolder.close,
+		w:              wrapSendWriter(dc, raw),
+		tm:             tm,
+		route:          detectRoute(pc),
+		inFrames:       make(chan dataFrame),
+		demuxDone:      make(chan struct{}),
+		demuxCancel:    demuxCancel,
+		ackBroadcastCh: make(chan struct{}),
 	}
 	s.demuxWG.Go(func() {
 		s.runDemux(demuxCtx)
@@ -302,6 +311,7 @@ func (s *Session) runDemux(ctx context.Context) {
 				return
 			}
 			total := int64(binary.BigEndian.Uint64(msg[1:n]))
+			s.recordAck(total)
 			if s.cfg.OnRemoteProgress != nil {
 				s.cfg.OnRemoteProgress(total)
 			}
@@ -312,20 +322,76 @@ func (s *Session) runDemux(ctx context.Context) {
 }
 
 // Push writes one outbound transfer: src is copied to the peer prefixed
-// with tagData frames and terminated by tagEOF. Returns once the framing
-// terminator has been written. Acks for this transfer flow asynchronously
-// through cfg.OnRemoteProgress and may continue to arrive after Push
-// returns. Not safe to call concurrently with itself.
+// with tagData frames and terminated by tagEOF, then waits for the peer's
+// final ack to cover every byte written. The ack barrier matters: without
+// it the caller's deferred Close races into the rtc teardown while the
+// peer is still draining buffered frames, and the peer can miss tagEOF
+// (the receiver's read loop sees the data channel reset before consuming
+// the final frame). Not safe to call concurrently with itself.
+//
+// lastAck is reset to zero at the start of each Push because the receiver's
+// ackingWriter rebuilds per Pull — every transfer's ack count starts at 0
+// and grows to that transfer's byte total. Each Push waits for the
+// transfer's own n, not a session-cumulative total.
 func (s *Session) Push(ctx context.Context, src io.Reader) error {
+	s.lastAck.Store(0)
 	tw := &lockedTagWriter{w: s.w, mu: &s.writeMu}
-	if _, err := io.Copy(tw, src); err != nil {
+	n, err := io.Copy(tw, src)
+	if err != nil {
 		return fmt.Errorf("push: copying payload: %w", err)
 	}
 	if err := tw.Close(); err != nil {
 		return fmt.Errorf("push: writing eof: %w", err)
 	}
-	_ = ctx
+	if err := s.waitAck(ctx, n); err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
 	return nil
+}
+
+// recordAck stores the cumulative ack total and wakes any waiter blocked
+// in waitAck. The closed-and-replaced channel pattern lets multiple
+// waiters notice the wakeup without losing edges between writes.
+func (s *Session) recordAck(total int64) {
+	s.lastAck.Store(total)
+	s.ackBroadcastMu.Lock()
+	close(s.ackBroadcastCh)
+	s.ackBroadcastCh = make(chan struct{})
+	s.ackBroadcastMu.Unlock()
+}
+
+// ackChannel returns the current broadcast channel under the lock that
+// guards close-and-replace. Callers must take the channel BEFORE checking
+// lastAck to avoid missing a signal that lands between the check and the
+// select.
+func (s *Session) ackChannel() <-chan struct{} {
+	s.ackBroadcastMu.Lock()
+	defer s.ackBroadcastMu.Unlock()
+	return s.ackBroadcastCh
+}
+
+// waitAck blocks until lastAck reaches target, the demuxer exits, or ctx
+// is cancelled. The receiver's flush() at tagEOF emits a final ack
+// covering every byte written, so for a successful transfer this returns
+// promptly after the peer drains the stream.
+func (s *Session) waitAck(ctx context.Context, target int64) error {
+	for {
+		ch := s.ackChannel()
+		if s.lastAck.Load() >= target {
+			return nil
+		}
+		select {
+		case <-ch:
+			// recordAck fired; loop and re-check lastAck.
+		case <-s.demuxDone:
+			if s.lastAck.Load() >= target {
+				return nil
+			}
+			return fmt.Errorf("session ended before final ack (acked %d, want %d)", s.lastAck.Load(), target)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // Pull reads one inbound transfer to dst, writing tagAck progress frames

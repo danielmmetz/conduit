@@ -482,6 +482,15 @@ func (s *Session) PumpErr() error {
 	return s.pumpErr
 }
 
+// PumpDone returns a channel closed when the inbound pump exits. Callers
+// blocked waiting for an inbound transfer can select on this to surface a
+// peer-side disconnect rather than hang forever — without it a one-shot
+// recv that loses the data channel before the preamble decodes never sees
+// its sink fire and waits indefinitely.
+func (s *Session) PumpDone() <-chan struct{} {
+	return s.pumpDone
+}
+
 // Route reports the transport ICE selected for this session — direct
 // peer-to-peer or relayed through TURN. Available immediately after Open*.
 func (s *Session) Route() rtc.Route {

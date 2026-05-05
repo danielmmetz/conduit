@@ -39,16 +39,20 @@ func main() {
 	defer cancel()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	if err := mainE(ctx, logger, os.Stdin, os.Stdout, os.Stderr, os.Args[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) || errors.Is(err, context.Canceled) {
+		if errors.Is(err, flag.ErrHelp) {
 			if ctx.Err() == nil {
 				os.Exit(2)
 			}
 			return
 		}
-		fmt.Fprintln(os.Stderr, "error:", err)
-		if ctx.Err() == nil {
-			os.Exit(1)
+		// Signal-driven cancellation exits non-zero (no error line — the
+		// user just hit ctrl-c). 130 is the conventional shell exit code
+		// for SIGINT (128 + 2).
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			os.Exit(130)
 		}
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
 	}
 }
 
@@ -97,8 +101,21 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 			// total is atomic because the encoder goroutine inside finalizeSource
 			// can begin reading (and firing the callback) before openSource
 			// returns and we learn Preamble.Size on the main goroutine.
+			//
+			// The meter stays hidden until pairing completes. Without that
+			// gate, a small payload that fits in the zstd encoder's input
+			// buffer races to 100% before the slot is even reserved — and if
+			// OpenSender fails or hangs, the user is left staring at a full
+			// progress bar with no code.
 			var total atomic.Int64
-			progress := func(n int64) { pr.Update(n, total.Load()) }
+			var sourceBytes atomic.Int64
+			var paired atomic.Bool
+			progress := func(n int64) {
+				sourceBytes.Store(n)
+				if paired.Load() {
+					pr.Update(n, total.Load())
+				}
+			}
 			src, err := openSource(text, args, stdin, git, xfer.SourceOptions{
 				Compression: mode,
 				Progress:    progress,
@@ -129,7 +146,11 @@ func sendCmd(logger *slog.Logger, stdin io.Reader, out, stderr io.Writer) *ffcli
 			defer sess.Close(ctx)
 			fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
 			totalSize := total.Load()
-			pr.Update(0, totalSize)
+			// Render the meter for the first time now that we're paired —
+			// catch up to any bytes the encoder has already consumed so the
+			// initial line reflects reality.
+			paired.Store(true)
+			pr.Update(sourceBytes.Load(), totalSize)
 			if err := sess.Push(ctx, src.Preamble, src.Reader); err != nil {
 				return fmt.Errorf("running send: %w", err)
 			}
@@ -239,6 +260,11 @@ func runRecvOnce(ctx context.Context, logger *slog.Logger, server string, policy
 	}
 	defer sess.Close(ctx)
 	fmt.Fprintf(stderr, "connection: %s\n", sess.Route())
+	// done fires from inside the sink chain — only after the preamble has
+	// been decoded and the sink closed. If the rtc session ends before that
+	// (peer disconnect, malformed preamble, etc.), the sink chain never
+	// runs and done stays empty. Watching pump termination lets us surface
+	// that disconnect instead of waiting for ctrl-c.
 	select {
 	case err := <-done:
 		if err != nil {
@@ -249,6 +275,12 @@ func runRecvOnce(ctx context.Context, logger *slog.Logger, server string, policy
 			fmt.Fprintf(out, "wrote %s\n", writtenAnnounce)
 		}
 		return nil
+	case <-sess.PumpDone():
+		pumpErr := sess.PumpErr()
+		if pumpErr != nil && !errors.Is(pumpErr, io.EOF) && !errors.Is(pumpErr, context.Canceled) {
+			return fmt.Errorf("running recv: %w", pumpErr)
+		}
+		return fmt.Errorf("running recv: connection closed before payload arrived")
 	case <-ctx.Done():
 		return ctx.Err()
 	}
