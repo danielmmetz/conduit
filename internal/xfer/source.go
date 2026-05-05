@@ -277,7 +277,12 @@ func writeTarPaths(tw *tar.Writer, paths []string, git bool) error {
 		if err != nil {
 			return fmt.Errorf("lstat %s: %w", p, err)
 		}
-		base := filepath.Base(p)
+		// tarSourceName so a `send .` (or `..`, or `/`) produces a meaningful
+		// wrapper directory in the archive — matching the preamble's friendly
+		// name. Without this the wrapper would be "." and the receiver would
+		// extract files flat into the destination, even though the preamble
+		// claims a sensible name.
+		base := tarSourceName(p)
 		if info.IsDir() {
 			root := filepath.Clean(p)
 			var ig *gitignore.GitIgnore

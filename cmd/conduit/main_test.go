@@ -685,6 +685,53 @@ func TestHumanDuration(t *testing.T) {
 	}
 }
 
+func TestSinkAnnounceNameTar(t *testing.T) {
+	t.Parallel()
+	sep := string(filepath.Separator)
+	cases := []struct {
+		name    string
+		pre     wire.Preamble
+		outPath string
+		want    string
+	}{
+		{
+			name: "single dir, default cwd",
+			pre:  wire.Preamble{Kind: wire.PreambleKindTar, Name: "mockups"},
+			want: "mockups" + sep,
+		},
+		{
+			name:    "single dir, explicit -o",
+			pre:     wire.Preamble{Kind: wire.PreambleKindTar, Name: "mockups"},
+			outPath: "/tmp/recv",
+			want:    "/tmp/recv" + sep + "mockups" + sep,
+		},
+		{
+			name: "multi-path falls back to root",
+			pre:  wire.Preamble{Kind: wire.PreambleKindTar, Name: "first (+2)"},
+			want: "." + sep,
+		},
+		{
+			name: "empty name falls back to root",
+			pre:  wire.Preamble{Kind: wire.PreambleKindTar, Name: ""},
+			want: "." + sep,
+		},
+		{
+			name: "dot name falls back to root",
+			pre:  wire.Preamble{Kind: wire.PreambleKindTar, Name: "."},
+			want: "." + sep,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := sinkAnnounceName(tc.pre, tc.outPath)
+			if got != tc.want {
+				t.Errorf("sinkAnnounceName(%+v, %q) = %q, want %q", tc.pre, tc.outPath, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenderQR(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer

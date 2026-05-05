@@ -572,18 +572,29 @@ func sinkWritesToStdout(pre wire.Preamble, outPath string) bool {
 // sees the payload). Mirrors xfer.OpenSink's path resolution so the
 // announce stays consistent with where the bytes actually land.
 func sinkAnnounceName(pre wire.Preamble, outPath string) string {
+	if pre.Kind == wire.PreambleKindTar {
+		// openTarSink extracts to outPath or CWD when unset.
+		root := outPath
+		if root == "" {
+			root = "."
+		}
+		// Single-path sends carry the source directory's name on the
+		// preamble and wrap every tar entry under it (see writeTarPaths +
+		// tarSourceName), so the actual files land under {root}/{name}/.
+		// Multi-path sends annotate the name as "first (+N)" — that's a
+		// CLI display string, not a real directory, so fall back to the
+		// extraction root in that case. Names with " (+...)" in them are
+		// extremely unlikely in practice.
+		if pre.Name != "" && pre.Name != "." && !strings.Contains(pre.Name, " (+") {
+			return filepath.Join(root, pre.Name) + string(filepath.Separator)
+		}
+		return root + string(filepath.Separator)
+	}
 	if outPath != "" && outPath != xfer.StdoutMarker {
 		return outPath
 	}
 	if pre.Kind == wire.PreambleKindFile && pre.Name != "" && pre.Name != "stdin" {
 		return filepath.Base(pre.Name)
-	}
-	if pre.Kind == wire.PreambleKindTar {
-		// openTarSink extracts to opts.OutPath or CWD when unset.
-		if outPath != "" {
-			return outPath + "/"
-		}
-		return "./"
 	}
 	return ""
 }
